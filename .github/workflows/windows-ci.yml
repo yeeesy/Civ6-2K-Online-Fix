@@ -1,0 +1,58 @@
+name: Windows CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-package:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build, test, and run native analysis
+        shell: pwsh
+        run: ./build.ps1 -Analyze
+
+      - name: Run offline self-test
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath './build/Civ6_2K_Online_Fix.exe' -ArgumentList '--self-test' -NoNewWindow -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Offline self-test failed with exit code $($process.ExitCode)."
+          }
+
+      - name: Exercise release packaging and checksums
+        shell: pwsh
+        run: |
+          ./package.ps1 -OutputName ci-package -AllowNonReleaseName
+          ./dist/ci-package/verify_hashes.ps1
+
+      - name: Rebuild from packaged source
+        shell: pwsh
+        run: |
+          Push-Location './dist/ci-package/source'
+          try {
+            ./build.ps1 -Analyze
+          }
+          finally {
+            Pop-Location
+          }
+          $packagedHash = (Get-FileHash './dist/ci-package/Civ6_2K_Online_Fix.exe' -Algorithm SHA256).Hash
+          $rebuiltHash = (Get-FileHash './dist/ci-package/source/build/Civ6_2K_Online_Fix.exe' -Algorithm SHA256).Hash
+          if ($rebuiltHash -ne $packagedHash) {
+            throw "Packaged-source rebuild is not byte-for-byte reproducible: $packagedHash != $rebuiltHash"
+          }

@@ -1,0 +1,6 @@
+; Copy this file to Civ6_2K_Online_Fix.ini beside the executable.
+; 0 = watch only; start the game yourself (recommended default)
+; 1 = request Steam's default launch option after listening starts;
+;     this does not guarantee DX11 or DX12
+[launch]
+auto_launch_steam=0

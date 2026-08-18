@@ -1,0 +1,39 @@
+#include <windows.h>
+#include "ProductIdentity.generated.h"
+
+#define CIV6FIX_ORIGINAL_FILENAME "Civ6_2K_Online_Fix.exe\0"
+
+1 VERSIONINFO
+ FILEVERSION CIV6FIX_VERSION_NUMERIC
+ PRODUCTVERSION CIV6FIX_VERSION_NUMERIC
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404B0"
+        BEGIN
+            VALUE "CompanyName", "Civ6 2K Online Fix contributors\0"
+            VALUE "FileDescription", "Civilization VI 2K Online Fix\0"
+            VALUE "FileVersion", CIV6FIX_VERSION_SEMVER "\0"
+            VALUE "InternalName", "Civ6_2K_Online_Fix\0"
+            VALUE "LegalCopyright", "Released under the MIT License\0"
+            VALUE "OriginalFilename", CIV6FIX_ORIGINAL_FILENAME
+            VALUE "ProductName", "Civ6 2K Online Fix\0"
+            VALUE "ProductVersion", CIV6FIX_VERSION_SEMVER "\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END
+
+1 RT_MANIFEST "ProductManifest.generated.manifest"
