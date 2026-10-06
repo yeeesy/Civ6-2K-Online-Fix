@@ -9,6 +9,7 @@
 #include <iostream>
 #include <limits>
 #include <string>
+#include <type_traits>
 
 namespace {
 
@@ -103,6 +104,11 @@ public:
     civ6fix::MonitorSample ReadMonitorSample(
         const civ6fix::TargetProcess&, const civ6fix::InstalledGuard&) override {
         ++monitorReadCalls;
+        if (!monitorSamples.empty()) {
+            const auto index = (std::min)(
+                static_cast<std::size_t>(monitorReadCalls - 1), monitorSamples.size() - 1);
+            return monitorSamples[index];
+        }
         return monitorSample;
     }
 
@@ -129,6 +135,7 @@ public:
     int monitorReadsBeforeExit = -1;
     int monitorReadCalls = 0;
     civ6fix::MonitorSample monitorSample;
+    std::vector<civ6fix::MonitorSample> monitorSamples;
 
 private:
     std::vector<std::string>& order_;
@@ -138,6 +145,14 @@ private:
 class SilentObserver final : public civ6fix::ISessionObserver {
 public:
     void OnSessionStatus(const civ6fix::SessionStatus&) override {}
+};
+
+class CapturingObserver final : public civ6fix::ISessionObserver {
+public:
+    void OnSessionStatus(const civ6fix::SessionStatus& status) override {
+        last = status;
+    }
+    civ6fix::SessionStatus last;
 };
 
 class MonitoringCountObserver final : public civ6fix::ISessionObserver {
@@ -167,6 +182,23 @@ private:
     bool stopped_ = false;
 };
 
+class ReviewStopObserver final : public civ6fix::ISessionObserver {
+public:
+    void OnSessionStatus(const civ6fix::SessionStatus& status) override {
+        if (session != nullptr &&
+            (stopBeforeInstall
+                 ? status.phase == civ6fix::SessionPhase::InstallingGuard
+                 : status.phase == civ6fix::SessionPhase::Monitoring &&
+                       ((status.discoveryState == 4 && status.ssoState == 4) ||
+                        (stopAfterSample && status.diagnostics.samples != 0)))) {
+            session->RequestStop();
+        }
+    }
+    civ6fix::FixSession* session = nullptr;
+    bool stopBeforeInstall = false;
+    bool stopAfterSample = false;
+};
+
 class LaunchAtListeningObserver final : public civ6fix::ISessionObserver {
 public:
     explicit LaunchAtListeningObserver(std::vector<std::string>& order)
@@ -188,10 +220,237 @@ private:
     bool requested_ = false;
 };
 
+void TestDetailedDiagnostics(TestRunner& tests) {
+    using namespace civ6fix;
+    tests.Expect(std::wstring(ClipboardFeedback(false)) == L"复制失败" &&
+                     std::wstring(ClipboardFeedback(true)) == L"已复制",
+                 "clipboard failure is not presented as a successful diagnostic copy");
+    for (const bool apiSuccess : {false, true}) {
+        std::uint64_t output = 123;
+        const auto error = ReadExactValue([&](std::uintptr_t, void* destination, std::size_t) {
+            std::memset(destination, 0xFF, 2);
+            return RawReadResult{apiSuccess, 2, apiSuccess ? 0U : 5U};
+        }, 0x1000, output);
+        tests.Expect(output == 123 && error == (apiSuccess ? 299U : 5U),
+                     apiSuccess ? "short successful reads cannot leak partial values"
+                                : "failed reads cannot modify a trusted output");
+    }
+    int calls = 0;
+    int output = -1;
+    const auto overflowError = ReadExactValue([&](std::uintptr_t, void*, std::size_t) {
+        ++calls; return RawReadResult{true, sizeof(int), 0};
+    }, (std::numeric_limits<std::uintptr_t>::max)(), output);
+    tests.Expect(overflowError == 487 && calls == 0 && output == -1,
+                 "exact reads reject range overflow before invoking the reader");
+
+    for (int failurePosition = 0; failurePosition < 2; ++failurePosition) {
+        int reads = 0;
+        const auto probe = ReadLockVector([&](std::uintptr_t, auto& value) -> std::uint32_t {
+            value = 0;
+            return reads++ == failurePosition ? 299U : 0U;
+        }, 0x1000, 2);
+        tests.Expect(probe.state == VectorProbeState::ReadFailed && probe.error == 299,
+                     failurePosition == 0 ? "unreadable vector begin is not treated as uninitialized"
+                                          : "unreadable vector end is not treated as uninitialized");
+    }
+    const auto emptyVector = ReadLockVector([](std::uintptr_t, auto& value) -> std::uint32_t {
+        value = 0; return 0;
+    }, 0x1000, 2);
+    tests.Expect(emptyVector.state == VectorProbeState::NotCreated,
+                 "only a successfully read zero-zero vector may skip the optional mutex probe");
+    const auto malformedVector = ReadLockVector([](std::uintptr_t address, auto& value) -> std::uint32_t {
+        value = address == 0x1000 ? 0x2000 : 0;
+        return 0;
+    }, 0x1000, 2);
+    tests.Expect(malformedVector.state == VectorProbeState::InvalidLayout,
+                 "a partially initialized nonempty lock vector fails closed");
+
+    const auto missing = ReadServiceField([](std::uintptr_t, auto& value) -> std::uint32_t {
+        value = 0; return 0;
+    }, 0x1000, 0x88, output);
+    tests.Expect(missing.quality == ReadQuality::NotCreated && output == -1,
+                 "a null service pointer is distinguished from a read error");
+    const auto failedPointer = ReadServiceField([](std::uintptr_t, auto& value) -> std::uint32_t {
+        value = 4; return 5;
+    }, 0x1000, 0x88, output);
+    tests.Expect(failedPointer.quality == ReadQuality::PointerReadFailed &&
+                     failedPointer.error == 5 && output == -1,
+                 "failed pointer reads cannot manufacture a ready state");
+    const auto failedState = ReadServiceField([](std::uintptr_t address, auto& value) -> std::uint32_t {
+        value = address == 0x1000 ? 0x2000 : 4;
+        return address == 0x1000 ? 0U : 299U;
+    }, 0x1000, 0x88, output);
+    tests.Expect(failedState.quality == ReadQuality::ValueReadFailed && output == -1,
+                 "partial service state reads discard even a ready-looking value");
+    const auto invalidPointer = ReadServiceField([](std::uintptr_t, auto& value) -> std::uint32_t {
+        using Value = std::remove_reference_t<decltype(value)>;
+        value = (std::numeric_limits<Value>::max)(); return 0;
+    }, 0x1000, 0x88, output);
+    tests.Expect(invalidPointer.quality == ReadQuality::InvalidAddress && output == -1,
+                 "service state offset cannot overflow the address space");
+    const auto counterFailure = SampleMonitor([](std::uintptr_t address, auto& value) -> std::uint32_t {
+        value = address == 0x2000 || address == 0x3000 ? 0x4000 : 4;
+        return address == 0x1000 ? 299U : 0U;
+    }, 0x1000, 0x2000, 0x3000);
+    tests.Expect(!counterFailure.readable && counterFailure.skippedInvalidUnlocks == 0 &&
+                     counterFailure.counter.error == 299 && counterFailure.discoveryState == 4 &&
+                     counterFailure.ssoState == 4,
+                 "counter failure does not suppress independent service readings");
+    {
+        std::vector<std::string> order;
+        ListenerOrderPlatform platform(order);
+        platform.installOutcome = GuardInstallOutcome::Installed;
+        platform.targetRunState = TargetRunState::Running;
+        platform.monitorSample = counterFailure;
+        CapturingObserver observer;
+        SessionOptions options;
+        options.monitorTimeoutMs = 15;
+        FixSession session(platform, observer, options);
+        tests.Expect(session.Run() == SessionResult::MonitorTimedOutHookKept &&
+                         observer.last.diagnostics.completeSamples == 0 && platform.restoreCalls == 0,
+                     "ready service values with an unreadable counter are not reported as success");
+    }
+    SessionDiagnostics history;
+    history.available = true;
+    for (std::uint64_t i = 0; i < 100; ++i) history.Record({true, i, 2, 2}, i * 10);
+    tests.Expect(history.eventCount == 32 && history.events.size() == 32 && history.omittedEvents == 68 &&
+                     history.events[3].atMs == 30 && history.events[4].atMs == 720 && history.events.back().atMs == 990,
+                 "bounded timeline retains first four and latest twenty-eight changes");
+    tests.Expect(history.samples == 100 && history.completeSamples == 100 && history.maxSampleGapMs == 10 &&
+                     history.firstInterceptionAtMs == std::optional<std::uint64_t>(10),
+                 "timeline aggregates retain accurate totals gaps and first intervention time");
+    const auto eventCount = history.eventCount;
+    history.Record({true, 99, 2, 2}, 1010);
+    tests.Expect(history.eventCount == eventCount && history.samples == 101 && history.omittedEvents == 68,
+                 "identical polls increase totals without duplicating timeline entries");
+    history.Record(counterFailure, 1020);
+    tests.Expect(history.counter.failures == 1 && history.counter.lastError == 299 &&
+                     history.lastGoodCounter == 99 && history.lastGoodDiscovery == 4 &&
+                     history.counter.lastValueAtMs == 1010,
+                 "last good value and freshness remain distinct from failed latest read");
+
+    SessionStatus status;
+    status.phase = SessionPhase::Completed;
+    status.result = SessionResult::MonitorTimedOutHookKept;
+    status.profile = &kDx12Profile;
+    status.diagnostics = history;
+    const auto report = BuildShareableDiagnostic(L"fixture", status, false);
+    tests.Expect(report.find(L"T1-COUNTER-UNREADABLE") != std::wstring::npos &&
+                     report.find(L"最近有效=99") != std::wstring::npos &&
+                     report.find(L"省略中间") != std::wstring::npos && report.size() < 20000,
+                 "diagnostic includes bounded timeline category and explicit last-good evidence");
+    const wchar_t* expectedCategories[] = {L"T0-NO-SAMPLE", L"T1-COUNTER-UNREADABLE",
+        L"T2-STATE-UNREADABLE", L"T3-OBJECT-NOT-CREATED", L"T4-INTERCEPTED-NOT-READY",
+        L"T5-NO-INTERCEPTION-NOT-READY"};
+    bool categoriesMatch = true;
+    for (int category = 0; category < 6; ++category) {
+        status.diagnostics = {};
+        status.diagnostics.available = true;
+        MonitorSample sample(true, category == 4 ? 1U : 0U, 2, 2);
+        if (category == 1) sample.counter = {ReadQuality::ValueReadFailed, 299};
+        if (category == 2) sample.discovery = {ReadQuality::PointerReadFailed, 5};
+        if (category == 3) sample.sso = {ReadQuality::NotCreated, 0};
+        if (category != 0) status.diagnostics.Record(sample, 10);
+        const auto categorized = BuildShareableDiagnostic(L"fixture", status, false);
+        categoriesMatch &= categorized.find(expectedCategories[category]) != std::wstring::npos;
+    }
+    tests.Expect(categoriesMatch, "all six timeout categories distinguish observation failures from unready states");
+    BuildProfile hostileProfile = kDx12Profile;
+    hostileProfile.id = L"SECRET_ACCOUNT";
+    hostileProfile.executableName = L"S:\\PrivateOwner\\private.exe";
+    hostileProfile.sha256 = L"SECRET_HASH";
+    status.profile = &hostileProfile;
+    status.pid = 987654321;
+    status.detail = L"S:\\PrivateOwner\\raw.jsonl 0xDEADBEEF token=SECRET_ACCOUNT";
+    bool privacySafe = true;
+    for (int result = 0; result <= static_cast<int>(SessionResult::TargetWaitFailedHookKept); ++result) {
+        status.result = static_cast<SessionResult>(result);
+        const auto shared = BuildShareableDiagnostic(L"fixture", status, true);
+        for (const auto* secret : {L"PrivateOwner", L"raw.jsonl", L"0xDEADBEEF", L"SECRET_ACCOUNT", L"SECRET_HASH", L"987654321"})
+            privacySafe &= shared.find(secret) == std::wstring::npos;
+    }
+    tests.Expect(privacySafe, "every result branch excludes raw detail profile strings path PID address and secrets");
+    {
+        std::vector<std::string> order;
+        ListenerOrderPlatform platform(order);
+        platform.installOutcome = GuardInstallOutcome::Installed;
+        platform.targetRunState = TargetRunState::Running;
+        platform.cleanupOutcome = HookCleanupOutcome::RestoreOwnedAndRetainAllocation;
+        platform.monitorSample = {true, 0, 2, 2};
+        ReviewStopObserver observer;
+        observer.stopAfterSample = true;
+        SessionOptions options;
+        options.monitorTimeoutMs = 0;
+        FixSession session(platform, observer, options);
+        observer.session = &session;
+        tests.Expect(session.Run() == SessionResult::CancelledOwnedHookRestoredAllocationRetained &&
+                         platform.restoreCalls == 1,
+                     "cancel during an unready sample wins over an already expired deadline");
+    }
+}
+
 }  // namespace
+
+void TestSessionReview(TestRunner& tests) {
+
+    for (const bool beforeInstall : {false, true}) {
+        std::vector<std::string> order;
+        ListenerOrderPlatform platform(order);
+        platform.installOutcome = civ6fix::GuardInstallOutcome::Installed;
+        platform.targetRunState = civ6fix::TargetRunState::Running;
+        platform.monitorSample = {true, 1, 4, 4};
+        platform.cleanupOutcome =
+            civ6fix::HookCleanupOutcome::RestoreOwnedAndRetainAllocation;
+        ReviewStopObserver observer;
+        observer.stopBeforeInstall = beforeInstall;
+        civ6fix::FixSession session(platform, observer);
+        observer.session = &session;
+        const auto result = session.Run();
+        tests.Expect(beforeInstall
+                         ? result == civ6fix::SessionResult::CancelledBeforeWrite &&
+                               platform.installCalls == 0
+                         : result == civ6fix::SessionResult::CancelledOwnedHookRestoredAllocationRetained &&
+                               platform.restoreCalls == 1,
+                     beforeInstall ? "cancel at install boundary prevents publication"
+                                   : "cancel during ready sample wins over success");
+    }
+    tests.Expect(
+        civ6fix::DecideMonitoring({0, 5, 4, false, false}) ==
+                civ6fix::MonitorDecision::ContinueMonitoring &&
+            civ6fix::DecideMonitoring({1, 4, (std::numeric_limits<int>::max)(), false, false}) ==
+                civ6fix::MonitorDecision::ContinueMonitoring,
+        "unrecognized service states cannot be reported as online");
+
+    std::vector<std::string> diagnosticOrder;
+    ListenerOrderPlatform diagnosticPlatform(diagnosticOrder);
+    diagnosticPlatform.installOutcome = civ6fix::GuardInstallOutcome::Installed;
+    diagnosticPlatform.targetRunState = civ6fix::TargetRunState::Running;
+    diagnosticPlatform.monitorSamples = {{true, 0, 2, 2}, {false, 0, -1, -1}};
+    CapturingObserver diagnosticObserver;
+    civ6fix::SessionOptions diagnosticOptions;
+    diagnosticOptions.monitorTimeoutMs = 10;
+    civ6fix::FixSession diagnosticSession(diagnosticPlatform, diagnosticObserver,
+                                         diagnosticOptions);
+    const auto diagnosticResult = diagnosticSession.Run();
+    const auto failedReadReport = civ6fix::BuildShareableDiagnostic(
+        L"test-build", diagnosticObserver.last, false);
+    tests.Expect(diagnosticResult == civ6fix::SessionResult::MonitorTimedOutHookKept &&
+                     diagnosticObserver.last.discoveryState == -1 &&
+                     diagnosticObserver.last.ssoState == -1 &&
+                     diagnosticPlatform.restoreCalls == 0,
+                 "failed final reads do not present stale values as current or remove guard");
+    tests.Expect(failedReadReport.find(L"诊断格式：2") != std::wstring::npos &&
+                     failedReadReport.find(L"读取失败") != std::wstring::npos &&
+                     failedReadReport.find(L"时间线") != std::wstring::npos &&
+                     failedReadReport.find(L"毫秒") != std::wstring::npos,
+                 "timeout diagnostic carries read quality and relative event evidence");
+
+}
 
 int main() {
     TestRunner tests;
+    TestDetailedDiagnostics(tests);
+    TestSessionReview(tests);
 
     const auto steamLibraries = civ6fix::ParseSteamLibraryFolders(
         R"VDF("libraryfolders"

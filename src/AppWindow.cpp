@@ -130,8 +130,13 @@ std::wstring ProfileText(const SessionStatus& status,
     text << L"已识别：" << renderer << L" · " << support << L" · PID "
          << status.pid;
     if (status.phase == SessionPhase::Monitoring) {
-        text << L" · 拦截 " << status.skippedInvalidUnlocks << L" · Discovery "
-             << status.discoveryState << L" · SSO " << status.ssoState;
+        const auto& sample = status.diagnostics.latest;
+        text << L" · 拦截 "
+             << (sample.counter.quality == ReadQuality::Value ? std::to_wstring(status.skippedInvalidUnlocks) : L"?")
+             << L" · Discovery "
+             << (sample.discovery.quality == ReadQuality::Value ? std::to_wstring(status.discoveryState) : L"?")
+             << L" · SSO "
+             << (sample.sso.quality == ReadQuality::Value ? std::to_wstring(status.ssoState) : L"?");
     }
     return text.str();
 }
@@ -147,27 +152,27 @@ COLORREF ToneColor(PresentationTone tone) {
     return RGB(55, 65, 81);
 }
 
-void SetClipboardText(HWND owner, const std::wstring& text) {
-    if (!OpenClipboard(owner)) {
-        return;
-    }
-    EmptyClipboard();
+bool SetClipboardText(HWND owner, const std::wstring& text) {
     const SIZE_T bytes = (text.size() + 1) * sizeof(wchar_t);
     HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (memory != nullptr) {
-        void* destination = GlobalLock(memory);
-        if (destination != nullptr) {
-            CopyMemory(destination, text.c_str(), bytes);
-            GlobalUnlock(memory);
-            if (SetClipboardData(CF_UNICODETEXT, memory) != nullptr) {
-                memory = nullptr;
-            }
-        }
-    }
-    if (memory != nullptr) {
+    if (memory == nullptr) return false;
+    void* destination = GlobalLock(memory);
+    if (destination == nullptr) {
         GlobalFree(memory);
+        return false;
     }
+    CopyMemory(destination, text.c_str(), bytes);
+    GlobalUnlock(memory);
+    // Allocate and populate before emptying the user's clipboard.
+    if (!OpenClipboard(owner)) {
+        GlobalFree(memory);
+        return false;
+    }
+    const bool copied = EmptyClipboard() != FALSE &&
+                        SetClipboardData(CF_UNICODETEXT, memory) != nullptr;
     CloseClipboard();
+    if (!copied) GlobalFree(memory);
+    return copied;
 }
 
 class WindowObserver final : public ISessionObserver {
@@ -506,11 +511,11 @@ private:
             break;
         }
         case kCopyId: {
-            SetClipboardText(
+            const bool copied = SetClipboardText(
                 window_, BuildShareableDiagnostic(
                              kProductVersionWide, latestStatus_,
                              steamLaunchRequested_));
-            SetWindowTextW(copyButton_, L"已复制");
+            SetWindowTextW(copyButton_, ClipboardFeedback(copied));
             break;
         }
         default:
@@ -582,7 +587,9 @@ private:
         workerFinished_.store(false, std::memory_order_release);
         SessionStatus startingStatus;
         startingStatus.phase = SessionPhase::Preparing;
-        ApplySessionControls(startingStatus);
+        // Discard any previous-session wake-ups before accepting new diagnostics.
+        while (statusMailbox_.TryPop().has_value()) {}
+        ApplyStatus(startingStatus);
         SetWindowTextW(copyButton_, L"复制脱敏诊断");
         ShowWindow(progress_, SW_SHOW);
         SendMessageW(progress_, PBM_SETMARQUEE, TRUE, 35);

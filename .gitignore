@@ -1,6 +1,7 @@
 /build/
 /build-dx12-experiment/
 /dist/
+/local-release/
 /logs/
 /artifacts/
 /evidence/

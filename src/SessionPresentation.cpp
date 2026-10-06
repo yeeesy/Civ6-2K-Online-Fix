@@ -19,6 +19,185 @@ const wchar_t* SupportStateName(SupportState state) noexcept {
     return L"Unsupported";
 }
 
+const wchar_t* PhaseCode(int phase) noexcept {
+    switch (static_cast<SessionPhase>(phase)) {
+    case SessionPhase::Created: return L"created";
+    case SessionPhase::Preparing: return L"preparing";
+    case SessionPhase::Listening: return L"listening";
+    case SessionPhase::WaitingForGame: return L"waiting-game";
+    case SessionPhase::ValidatingRuntime: return L"validating-runtime";
+    case SessionPhase::InstallingGuard: return L"installing-guard";
+    case SessionPhase::Monitoring: return L"monitoring";
+    case SessionPhase::Completed: return L"completed";
+    }
+    return L"unknown";
+}
+
+const wchar_t* ResultCode(SessionResult result) noexcept {
+    // Fixed allowlist; never forward a Win32 error message or platform detail.
+#define RESULT_CODE(name) case SessionResult::name: return L## #name
+    switch (result) {
+    RESULT_CODE(None); RESULT_CODE(Fixed); RESULT_CODE(OnlineWithoutIntervention);
+    RESULT_CODE(MonitorTimedOutHookKept); RESULT_CODE(CandidateDetectedReadOnly);
+    RESULT_CODE(TargetExited); RESULT_CODE(CancelledBeforeWrite);
+    RESULT_CODE(CancelledOwnedHookRestoredAllocationRetained);
+    RESULT_CODE(CancelledOwnedHookRestoredProtectionUncertainAllocationRetained);
+    RESULT_CODE(CancelledHookNotOwnedNoWrite); RESULT_CODE(ExistingGameNoWrite);
+    RESULT_CODE(ProcessScanFailedNoWrite); RESULT_CODE(InstallationNotFoundNoWrite);
+    RESULT_CODE(UnsupportedBuildNoWrite); RESULT_CODE(HashFailedNoWrite);
+    RESULT_CODE(SteamLaunchFailedNoWrite); RESULT_CODE(TargetWaitTimedOutNoWrite);
+    RESULT_CODE(RuntimeMismatchNoWrite); RESULT_CODE(GuardInstallFailed);
+    RESULT_CODE(GuardInstallFailedNoHookProtectionUncertain);
+    RESULT_CODE(GuardInstallFailedRestoredAllocationRetained);
+    RESULT_CODE(GuardInstallFailedRestoredProtectionUncertainAllocationRetained);
+    RESULT_CODE(GuardInstallFailedStateUncertainAllocationRetained);
+    RESULT_CODE(TargetWaitFailedHookKept);
+    }
+#undef RESULT_CODE
+    return L"Unknown";
+}
+
+const wchar_t* QualityName(ReadQuality quality) noexcept {
+    switch (quality) {
+    case ReadQuality::NotSampled: return L"未采样";
+    case ReadQuality::Value: return L"可读";
+    case ReadQuality::NotCreated: return L"对象尚未创建";
+    case ReadQuality::PointerReadFailed: return L"对象指针读取失败";
+    case ReadQuality::ValueReadFailed: return L"数值读取失败";
+    case ReadQuality::InvalidAddress: return L"地址范围不合法";
+    case ReadQuality::Unavailable: return L"读取失败/上下文不可用";
+    }
+    return L"未知读取状态";
+}
+
+const wchar_t* ValidationName(int value) noexcept {
+    switch (static_cast<RuntimeValidationOutcome>(value)) {
+    case RuntimeValidationOutcome::Valid: return L"valid";
+    case RuntimeValidationOutcome::ProcessExited: return L"process-exited";
+    case RuntimeValidationOutcome::ProcessIdentityMismatch: return L"process-identity-mismatch";
+    case RuntimeValidationOutcome::ImagePathMismatch: return L"image-path-mismatch";
+    case RuntimeValidationOutcome::PeIdentityMismatch: return L"pe-identity-mismatch";
+    case RuntimeValidationOutcome::IatTargetMismatch: return L"iat-target-mismatch";
+    case RuntimeValidationOutcome::MutexLayoutMismatch: return L"mutex-layout-mismatch";
+    case RuntimeValidationOutcome::ReadFailed: return L"read-failed";
+    }
+    return L"unknown";
+}
+
+const wchar_t* InstallName(int value) noexcept {
+    switch (static_cast<GuardInstallOutcome>(value)) {
+    case GuardInstallOutcome::Installed: return L"installed";
+    case GuardInstallOutcome::FailedNoHook: return L"failed-no-hook";
+    case GuardInstallOutcome::FailedNoHookProtectionUncertain: return L"failed-no-hook-protection-uncertain";
+    case GuardInstallOutcome::FailedRestoredAllocationRetained: return L"failed-restored-retained";
+    case GuardInstallOutcome::FailedRestoredProtectionUncertainAllocationRetained: return L"failed-restored-protection-uncertain-retained";
+    case GuardInstallOutcome::FailedStateUncertainAllocationRetained: return L"failed-state-uncertain-retained";
+    }
+    return L"unknown";
+}
+
+const wchar_t* TimeoutCategory(const SessionDiagnostics& d) noexcept {
+    if (d.samples == 0) return L"T0-NO-SAMPLE：没有取得监控样本";
+    if (d.latest.counter.quality != ReadQuality::Value)
+        return L"T1-COUNTER-UNREADABLE：末次拦截计数不可读";
+    const auto badRead = [](ReadQuality q) {
+        return q != ReadQuality::Value && q != ReadQuality::NotCreated;
+    };
+    if (badRead(d.latest.discovery.quality) || badRead(d.latest.sso.quality))
+        return L"T2-STATE-UNREADABLE：末次服务状态读取不完整";
+    if (d.latest.discovery.quality == ReadQuality::NotCreated || d.latest.sso.quality == ReadQuality::NotCreated)
+        return L"T3-OBJECT-NOT-CREATED：末次服务对象尚未创建";
+    if (d.latest.skippedInvalidUnlocks != 0)
+        return L"T4-INTERCEPTED-NOT-READY：已拦截，但未确认同时就绪";
+    return L"T5-NO-INTERCEPTION-NOT-READY：未观察到拦截，未确认同时就绪";
+}
+
+template <typename Number>
+void WriteField(std::wostringstream& text, const wchar_t* name,
+                const FieldRead& field, Number value, const FieldStatistics& stats,
+                Number lastGood, std::uint64_t elapsed) {
+    text << name << L"：";
+    if (field.quality == ReadQuality::Value) text << value << L"；";
+    text << QualityName(field.quality) << L"；Win32=" << field.error
+         << L"；成功/对象未创建/读取失败=" << stats.values << L"/" << stats.absent << L"/" << stats.failures;
+    if (stats.values != 0) {
+        text << L"；最近有效=" << lastGood << L"（距快照 "
+             << (elapsed >= stats.lastValueAtMs ? elapsed - stats.lastValueAtMs : 0) << L" 毫秒）";
+    } else {
+        text << L"；从未取得有效值";
+    }
+    text << L"；最近非零错误=" << stats.lastError << L"\r\n";
+}
+
+template <typename Number>
+void WriteEventField(std::wostringstream& text, const FieldRead& field, Number value) {
+    if (field.quality == ReadQuality::Value) text << value;
+    else text << QualityName(field.quality) << L"(Win32=" << field.error << L")";
+}
+
+void WriteEvidence(std::wostringstream& text, const SessionStatus& status) {
+    const auto& d = status.diagnostics;
+    text << L"诊断格式：2（增强脱敏诊断）\r\n"
+         << L"结果码：" << ResultCode(status.result) << L"\r\n"
+         << L"当前阶段：" << PhaseCode(static_cast<int>(status.phase)) << L"\r\n";
+    if (!d.available) {
+        text << L"采集：尚未开始；以下旧式数值无读取质量和时间证据\r\n";
+        return;
+    }
+    text << L"最后活动阶段：" << PhaseCode(d.lastActivePhase) << L"\r\n"
+         << L"会话耗时：" << d.elapsedMs << L" 毫秒\r\n阶段耗时（毫秒）：";
+    for (std::size_t i = 0; i < d.phaseMs.size() - 1; ++i)
+        text << PhaseCode(static_cast<int>(i)) << L"=" << d.phaseMs[i] << L" ";
+    text << L"\r\n等待游戏上限/监控上限/轮询间隔（毫秒）："
+         << d.waitTimeoutMs << L"/" << d.monitorTimeoutMs << L"/" << d.monitorPollMs
+         << L"\r\n进程扫描 Win32：" << d.scanError
+         << L"\r\n运行时校验：" << (d.validationAttempted ? ValidationName(d.validationOutcome) : L"未执行")
+         << L"；Win32=" << d.validationError
+         << L"\r\nGuard 安装：" << (d.installAttempted ? InstallName(d.installOutcome) : L"未执行")
+         << L"；Win32=" << d.installError << L"\r\n";
+    if (d.guardInstalled) {
+        text << L"安装时游戏进程年龄：";
+        if (d.processAgeAtGuardMs) text << *d.processAgeAtGuardMs << L" 毫秒（系统时钟估算，不能证明介入足够早）";
+        else text << L"未知";
+        text << L"\r\n";
+    }
+    text << L"安装前锁探测：";
+    switch (d.mutexProbe) {
+    case VectorProbeState::NotAttempted: text << L"未探测"; break;
+    case VectorProbeState::ReadFailed: text << L"读取失败"; break;
+    case VectorProbeState::NotCreated: text << L"向量为空（尚未创建）"; break;
+    case VectorProbeState::Available: text << L"布局可读"; break;
+    case VectorProbeState::InvalidLayout: text << L"布局不符"; break;
+    }
+    if (d.mutexCountBeforeGuard) text << L"；锁计数=" << *d.mutexCountBeforeGuard;
+    text << L"\r\n监控耗时：" << d.monitorElapsedMs << L" 毫秒；样本/完整样本="
+         << d.samples << L"/" << d.completeSamples << L"；最大采样间隔=" << d.maxSampleGapMs << L" 毫秒\r\n";
+    if (d.samples) text << L"末次采样距快照：" << d.monitorElapsedMs - d.lastSampleAtMs << L" 毫秒\r\n";
+    WriteField(text, L"拦截", d.latest.counter, d.latest.skippedInvalidUnlocks, d.counter, d.lastGoodCounter, d.monitorElapsedMs);
+    WriteField(text, L"Discovery", d.latest.discovery, d.latest.discoveryState, d.discovery, d.lastGoodDiscovery, d.monitorElapsedMs);
+    WriteField(text, L"SSO", d.latest.sso, d.latest.ssoState, d.sso, d.lastGoodSso, d.monitorElapsedMs);
+    text << L"首次观察到拦截：";
+    if (d.firstInterceptionAtMs) text << L"监控开始后 " << *d.firstInterceptionAtMs << L" 毫秒";
+    else text << L"未观察到（不等于此前从未发生）";
+    text << L"\r\n";
+    if (status.result == SessionResult::MonitorTimedOutHookKept)
+        text << L"超时分类：" << TimeoutCategory(d) << L"\r\n";
+    text << L"状态变化时间线（相对监控开始；毫秒；C=拦截/D=Discovery/S=SSO）：\r\n";
+    for (std::size_t i = 0; i < d.eventCount && i < d.events.size(); ++i) {
+        if (i == SessionDiagnostics::kKeepFirst && d.omittedEvents)
+            text << L"  …省略中间 " << d.omittedEvents << L" 次变化…\r\n";
+        const auto& event = d.events[i];
+        text << L"  +" << event.atMs << L" C=";
+        WriteEventField(text, event.sample.counter, event.sample.skippedInvalidUnlocks);
+        text << L" D="; WriteEventField(text, event.sample.discovery, event.sample.discoveryState);
+        text << L" S="; WriteEventField(text, event.sample.sso, event.sample.ssoState);
+        text << L"\r\n";
+    }
+    text << L"说明：仅状态 4 按已验证就绪处理；其他数值原样记录，未建立阶段含义映射。三个字段为顺序读取，非原子快照。分类是排查入口，不是根因判定。\r\n"
+         << L"SQLite/网络/账号状态：本工具未检查；不会据此判断数据库损坏或排除网络问题。\r\n"
+         << L"反馈请补充：游戏内实际在线/离线；是否到主菜单；每次还是偶发；是否做过缓存操作（只给文件名和脱敏相对位置）；如已有前后报告请同时提供。不要为采集报告删除数据库。\r\n";
+}
+
 }  // namespace
 
 SessionPresentation PresentSessionResult(SessionResult result) {
@@ -36,7 +215,7 @@ SessionPresentation PresentSessionResult(SessionResult result) {
                 PresentationTone::Success, true, false};
     case SessionResult::MonitorTimedOutHookKept:
         return {L"状态确认超时",
-                L"高频监控已停止；为避免中途失去保护，Hook Guard 会保留到游戏退出。现在可以关闭窗口，详细状态可在日志中查看。",
+                L"限定时间内未确认 2K 同时就绪，不等于已判定修复失败或数据库损坏。高频监控已停止，Hook Guard 保留到游戏退出；现在可关闭窗口。请复制脱敏诊断反馈，并补充游戏内实际状态；需要重试时请先自行退出游戏。",
                 PresentationTone::Warning, true, true};
     case SessionResult::CandidateDetectedReadOnly:
         return {L"识别到只读候选构建",
@@ -223,15 +402,18 @@ std::wstring BuildShareableDiagnostic(
     if (status.profile != nullptr) {
         text << L"渲染器：" << RendererName(status.profile->renderer) << L"\r\n"
              << L"Profile：" << SupportStateName(status.profile->supportState)
-             << L"\r\n"
-             << L"拦截：" << status.skippedInvalidUnlocks << L"\r\n"
-             << L"Discovery：" << status.discoveryState << L"\r\n"
-             << L"SSO：" << status.ssoState << L"\r\n";
+             << L"\r\n";
+        if (!status.diagnostics.available) {
+            text << L"拦截：" << status.skippedInvalidUnlocks << L"\r\n"
+                 << L"Discovery：" << status.discoveryState << L"\r\n"
+                 << L"SSO：" << status.ssoState << L"\r\n";
+        }
     } else {
         text << L"渲染器：尚未识别\r\n"
              << L"Profile：尚未识别\r\n";
     }
-    text << L"隐私：此共享摘要已省略日志路径、PID 和内存地址；"
+    WriteEvidence(text, status);
+    text << L"隐私：此共享摘要已省略日志路径、PID 和内存地址；不含用户名、账号、数据库内容或原始错误文本；"
             L"不要直接公开原始 JSONL。";
     return text.str();
 }
