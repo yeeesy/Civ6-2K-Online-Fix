@@ -12,7 +12,7 @@
 & '.\build.ps1' -Analyze
 & '.\build\Civ6_2K_Online_Fix.exe' --self-test
 & '.\package.ps1'
-& '.\dist\Civ6_2K_Online_Fix_1.0.0\verify_hashes.ps1'
+& '.\dist\Civ6_2K_Online_Fix_1.1.0\verify_hashes.ps1'
 ```
 
 发布包还应从包内 `source` 目录在另一绝对路径重新构建，并确认重建程序与包内程序逐字节一致。
@@ -53,3 +53,5 @@
 ## 诊断隐私
 
 工具不会自动上传诊断资料。公开问题应优先使用 GUI 的“复制脱敏诊断”；`--diagnose` 输出和原始 JSONL 可能包含本机路径、PID、内存地址和文件哈希，只能在检查并脱敏后提供必要片段。
+
+增强报告的字段、分类和反馈流程见 [DIAGNOSTICS.md](DIAGNOSTICS.md)，本次手工源码 Review 见 [REVIEW_2026-09-27.md](REVIEW_2026-09-27.md)。共享报告只允许类型化白名单字段，禁止透传 `detail`、任意 Profile 文本或原始日志。新增字段必须补对应隐私和负向读取测试。状态含义未知时保留原始数值，禁止猜测成某个初始化阶段。

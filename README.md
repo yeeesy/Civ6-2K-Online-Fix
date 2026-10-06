@@ -8,7 +8,7 @@
 
 ## 当前版本
 
-`1.0.0` 是本项目第一次正式公开发布。
+`1.0.0` 是第一次正式公开发布。当前版本 `1.1.0` 改进了读取失败与停止请求的处理，并增强了脱敏诊断摘要：新增状态变化时间线、逐字段读取质量、阶段耗时和超时分类。可从 [Releases](https://github.com/yeeesy/Civ6-2K-Online-Fix/releases) 下载。需要反馈超时问题的用户请使用新版本，并在最终结果出现后复制完整诊断。
 
 | 渲染器 | 状态 | 工具行为 |
 | --- | --- | --- |
@@ -49,6 +49,8 @@ Civ6_2K_Online_Fix.exe --self-test          纯离线自检
 
 报告普通问题时，优先使用 GUI 的“复制脱敏诊断”。`--diagnose` 输出和原始 JSONL 可能包含本机路径、PID、内存地址及文件哈希；工具不会自动上传这些资料，请勿将原始日志直接发布到公开 Issue。
 
+`1.1.0` 的增强诊断提供读取质量、相对时间线和超时分类，详见 [脱敏诊断与超时反馈](docs/DIAGNOSTICS.md)。旧版 `1.0.0` 仍采用简要报告格式，请以报告中的诊断格式为准。超时只表示未在期限内确认同时就绪，不等于数据库损坏；不要因此直接删除 SQLite 文件。
+
 ## 安全与隐私
 
 - 不修改游戏文件、存档、Mod、Steam 配置或账号数据。
@@ -78,4 +80,4 @@ Civ6_2K_Online_Fix.exe --self-test          纯离线自检
 
 ## English summary
 
-Civ6 2K Online Fix is an unofficial Windows helper for a specific local initialization failure in the Steam version of Civilization VI. It recognizes supported DX11 and DX12 builds, validates the target process and runtime environment, and fails closed when any required identity or ownership check is uncertain. It does not bypass authentication, account, or game-ownership checks. Version 1.0.0 is the first official public release. Source code, releases, checksums, and issue tracking are available at [github.com/yeeesy/Civ6-2K-Online-Fix](https://github.com/yeeesy/Civ6-2K-Online-Fix).
+Civ6 2K Online Fix is an unofficial Windows helper for a specific local initialization failure in the Steam version of Civilization VI. It recognizes supported DX11 and DX12 builds, validates the target process and runtime environment, and fails closed when any required identity or ownership check is uncertain. It does not bypass authentication, account, or game-ownership checks. Version 1.1.0 improves the shareable diagnostic summary and fixes several smaller issues. Source code, releases, checksums, and issue tracking are available at [github.com/yeeesy/Civ6-2K-Online-Fix](https://github.com/yeeesy/Civ6-2K-Online-Fix).

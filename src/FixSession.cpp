@@ -48,14 +48,26 @@ void FixSession::Publish(SessionPhase phase, SessionResult result,
     status.phase = phase;
     status.result = result;
     status.detail = std::move(detail);
+    const auto now = platform_.MonotonicMilliseconds();
+    if (phase != activePhase_) {
+        diagnostics_.phaseMs[static_cast<std::size_t>(activePhase_)] += now - phaseStartedMs_;
+        activePhase_ = phase;
+        phaseStartedMs_ = now;
+    }
+    if (phase != SessionPhase::Completed) diagnostics_.lastActivePhase = static_cast<int>(phase);
+    diagnostics_.elapsedMs = now - startedMs_;
+    if (monitorStartedMs_) diagnostics_.monitorElapsedMs = now - *monitorStartedMs_;
+    status.diagnostics = diagnostics_;
+    status.diagnostics.phaseMs[static_cast<std::size_t>(activePhase_)] += now - phaseStartedMs_;
     if (target != nullptr) {
         status.profile = target->profile;
         status.pid = target->pid;
     }
     if (sample != nullptr) {
-        status.skippedInvalidUnlocks = sample->skippedInvalidUnlocks;
-        status.discoveryState = sample->discoveryState;
-        status.ssoState = sample->ssoState;
+        status.skippedInvalidUnlocks = sample->counter.quality == ReadQuality::Value
+                                          ? sample->skippedInvalidUnlocks : 0;
+        status.discoveryState = sample->discovery.quality == ReadQuality::Value ? sample->discoveryState : -1;
+        status.ssoState = sample->sso.quality == ReadQuality::Value ? sample->ssoState : -1;
     }
     observer_.OnSessionStatus(status);
 }
@@ -69,6 +81,14 @@ SessionResult FixSession::Finish(SessionResult result,
 }
 
 SessionResult FixSession::Run() {
+    startedMs_ = phaseStartedMs_ = platform_.MonotonicMilliseconds();
+    diagnostics_ = {};
+    diagnostics_.available = true;
+    diagnostics_.monitorTimeoutMs = options_.monitorTimeoutMs;
+    diagnostics_.monitorPollMs = options_.monitorPollMs;
+    diagnostics_.waitTimeoutMs = options_.targetWaitTimeoutMs;
+    activePhase_ = SessionPhase::Created;
+    monitorStartedMs_.reset();
     Publish(SessionPhase::Preparing);
     const PreparationResult preparation = platform_.Prepare();
     if (preparation.outcome != PreparationOutcome::Ready) {
@@ -120,6 +140,7 @@ SessionResult FixSession::Run() {
         }
         const TargetScanResult scan = platform_.ScanForTarget();
         if (scan.outcome == TargetScanOutcome::Failed) {
+            diagnostics_.scanError = scan.win32Error;
             return Finish(SessionResult::ProcessScanFailedNoWrite, nullptr, nullptr,
                           L"target process scan failed");
         }
@@ -145,6 +166,11 @@ SessionResult FixSession::Run() {
     Publish(SessionPhase::ValidatingRuntime, SessionResult::None, &target);
     const RuntimeValidationResult validation =
         platform_.ValidateRuntime(target, *target.profile);
+    diagnostics_.validationAttempted = true;
+    diagnostics_.validationOutcome = static_cast<int>(validation.outcome);
+    diagnostics_.validationError = validation.win32Error;
+    diagnostics_.mutexProbe = validation.mutexProbe;
+    diagnostics_.mutexCountBeforeGuard = validation.mutexCount;
     if (validation.outcome != RuntimeValidationOutcome::Valid) {
         return Finish(SessionResult::RuntimeMismatchNoWrite, &target, nullptr,
                       validation.detail);
@@ -161,8 +187,14 @@ SessionResult FixSession::Run() {
     }
 
     Publish(SessionPhase::InstallingGuard, SessionResult::None, &target);
+    if (StopRequested()) {
+        return Finish(SessionResult::CancelledBeforeWrite, &target);
+    }
     const GuardInstallResult installation =
         platform_.InstallGuard(target, *target.profile);
+    diagnostics_.installAttempted = true;
+    diagnostics_.installOutcome = static_cast<int>(installation.outcome);
+    diagnostics_.installError = installation.win32Error;
     if (installation.outcome != GuardInstallOutcome::Installed) {
         SessionResult failure = SessionResult::GuardInstallFailed;
         if (installation.outcome ==
@@ -186,10 +218,15 @@ SessionResult FixSession::Run() {
         return Finish(failure, &target, nullptr, installation.detail);
     }
 
-    Publish(SessionPhase::Monitoring, SessionResult::None, &target);
+    diagnostics_.guardInstalled = true;
+    diagnostics_.processAgeAtGuardMs = platform_.ProcessAgeMilliseconds(target);
     const std::uint64_t monitorStarted = platform_.MonotonicMilliseconds();
+    monitorStartedMs_ = monitorStarted;
+    Publish(SessionPhase::Monitoring, SessionResult::None, &target);
+    std::uint64_t lastPublishedMs = 0;
     MonitorSample current;
     for (;;) {
+        diagnostics_.monitorElapsedMs = platform_.MonotonicMilliseconds() - monitorStarted;
         if (StopRequested()) {
             const HookCleanupOutcome cleanup =
                 platform_.RestoreOwnedHook(target, installation.guard);
@@ -223,24 +260,29 @@ SessionResult FixSession::Run() {
 
         const MonitorSample sample =
             platform_.ReadMonitorSample(target, installation.guard);
-        if (sample.readable) {
-            const bool changed =
-                !current.readable ||
-                sample.skippedInvalidUnlocks != current.skippedInvalidUnlocks ||
-                sample.discoveryState != current.discoveryState ||
-                sample.ssoState != current.ssoState;
-            current = sample;
-            if (changed) {
-                Publish(SessionPhase::Monitoring, SessionResult::None, &target,
-                        &current);
-            }
+        current = sample;
+        const auto sampledAtMs = platform_.MonotonicMilliseconds() - monitorStarted;
+        const bool changed = diagnostics_.Record(sample, sampledAtMs);
+        const bool ready = CompleteSample(sample) && sample.discoveryState == 4 && sample.ssoState == 4;
+        // Bound UI/log volume, but never suppress the first or ready observation.
+        if (diagnostics_.samples == 1 || ready ||
+            (changed && sampledAtMs - lastPublishedMs >= 250) ||
+            sampledAtMs - lastPublishedMs >= 1000) {
+            Publish(SessionPhase::Monitoring, SessionResult::None, &target, &current);
+            lastPublishedMs = sampledAtMs;
         }
 
         const std::uint64_t now = platform_.MonotonicMilliseconds();
+        diagnostics_.monitorElapsedMs = now - monitorStarted;
+        // An observer or the UI may cancel during the sample read/publication.
+        // Return to the owned-hook cleanup path before selecting a terminal result.
+        if (StopRequested()) {
+            continue;
+        }
         const MonitorDecision decision = DecideMonitoring({
             current.skippedInvalidUnlocks,
-            current.discoveryState,
-            current.ssoState,
+            CompleteSample(current) ? current.discoveryState : -1,
+            CompleteSample(current) ? current.ssoState : -1,
             now - monitorStarted >= options_.monitorTimeoutMs,
             false,
         });

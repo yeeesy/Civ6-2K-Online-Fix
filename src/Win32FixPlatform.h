@@ -29,6 +29,7 @@ public:
     HookCleanupOutcome RestoreOwnedHook(
         const TargetProcess& target, const InstalledGuard& guard) override;
     std::uint64_t MonotonicMilliseconds() override;
+    std::optional<std::uint64_t> ProcessAgeMilliseconds(const TargetProcess& target) override;
     void SleepFor(std::uint32_t milliseconds) override;
 
 private:

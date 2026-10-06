@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Civ6FixCore.h"
+#include "DiagnosticData.h"
 
 #include <atomic>
 #include <cstdint>
@@ -80,6 +81,7 @@ struct SessionStatus {
     int discoveryState = -1;
     int ssoState = -1;
     std::wstring detail;
+    SessionDiagnostics diagnostics;
 };
 
 class ISessionObserver {
@@ -136,6 +138,8 @@ struct RuntimeValidationResult {
     RuntimeValidationOutcome outcome = RuntimeValidationOutcome::ReadFailed;
     std::uint32_t win32Error = 0;
     std::wstring detail;
+    VectorProbeState mutexProbe = VectorProbeState::NotAttempted;
+    std::optional<std::int32_t> mutexCount;
 };
 
 struct InstalledGuard {
@@ -168,13 +172,6 @@ enum class TargetRunState {
     WaitFailed,
 };
 
-struct MonitorSample {
-    bool readable = false;
-    std::uint64_t skippedInvalidUnlocks = 0;
-    int discoveryState = -1;
-    int ssoState = -1;
-};
-
 class IFixSessionPlatform {
 public:
     virtual ~IFixSessionPlatform() = default;
@@ -192,6 +189,9 @@ public:
     virtual HookCleanupOutcome RestoreOwnedHook(
         const TargetProcess& target, const InstalledGuard& guard) = 0;
     virtual std::uint64_t MonotonicMilliseconds() = 0;
+    virtual std::optional<std::uint64_t> ProcessAgeMilliseconds(const TargetProcess&) {
+        return std::nullopt;
+    }
     virtual void SleepFor(std::uint32_t milliseconds) = 0;
 };
 
@@ -227,6 +227,11 @@ private:
     SessionOptions options_;
     std::atomic_bool stopRequested_{false};
     std::atomic_bool steamLaunchRequested_{false};
+    SessionDiagnostics diagnostics_;
+    std::uint64_t startedMs_ = 0;
+    std::uint64_t phaseStartedMs_ = 0;
+    std::optional<std::uint64_t> monitorStartedMs_;
+    SessionPhase activePhase_ = SessionPhase::Created;
 };
 
 }  // namespace civ6fix

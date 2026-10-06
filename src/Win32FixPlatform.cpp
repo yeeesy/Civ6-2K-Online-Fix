@@ -366,11 +366,20 @@ bool SameProcessObject(HANDLE left, HANDLE right) {
 }
 
 template <typename T>
+DWORD ReadRemoteError(HANDLE process, std::uintptr_t address, T& value) {
+    return ReadExactValue([process](std::uintptr_t remote, void* output, std::size_t size) {
+        SIZE_T transferred = 0;
+        const bool success = ReadProcessMemory(process, reinterpret_cast<LPCVOID>(remote),
+                                                output, size, &transferred) != FALSE;
+        return RawReadResult{success, transferred, success ? ERROR_SUCCESS : GetLastError()};
+    }, address, value);
+}
+
+template <typename T>
 bool ReadRemote(HANDLE process, std::uintptr_t address, T& value) {
-    SIZE_T read = 0;
-    return ReadProcessMemory(process, reinterpret_cast<LPCVOID>(address), &value,
-                             sizeof(value), &read) != FALSE &&
-           read == sizeof(value);
+    const DWORD error = ReadRemoteError(process, address, value);
+    if (error != ERROR_SUCCESS) SetLastError(error);
+    return error == ERROR_SUCCESS;
 }
 
 bool WriteRemote(HANDLE process, std::uintptr_t address, const void* data,
@@ -1167,23 +1176,24 @@ RuntimeValidationResult Win32FixPlatform::ValidateRuntime(
 
     const std::uintptr_t vectorAddress =
         mainModule->base + profile.opensslLockVectorRva;
-    std::uintptr_t begin = 0;
-    std::uintptr_t end = 0;
-    if (ReadRemote(impl_->process.Get(), vectorAddress, begin) &&
-        ReadRemote(impl_->process.Get(), vectorAddress + sizeof(std::uintptr_t), end) &&
-        (begin != 0 || end != 0)) {
-        if (!IsPointerVectorIndexAvailable(begin, end,
-                                           profile.opensslLockIndex)) {
-            impl_->process.Reset();
-            return {RuntimeValidationOutcome::MutexLayoutMismatch,
-                    ERROR_INVALID_DATA,
-                    L"OpenSSL 锁向量布局与 Build Profile 不一致。"};
-        }
+    const auto vector = ReadLockVector(
+        [&](std::uintptr_t address, auto& value) {
+            return ReadRemoteError(impl_->process.Get(), address, value);
+        }, vectorAddress, profile.opensslLockIndex);
+    std::optional<std::int32_t> observedMutexCount;
+    if (vector.state == VectorProbeState::ReadFailed ||
+        vector.state == VectorProbeState::InvalidLayout) {
+        impl_->process.Reset();
+        return {RuntimeValidationOutcome::MutexLayoutMismatch,
+                vector.error,
+                L"OpenSSL 锁向量不可读或布局与 Build Profile 不一致。", vector.state};
+    }
+    if (vector.state == VectorProbeState::Available) {
         std::uintptr_t lock = 0;
         std::int32_t owner = 0;
         std::int32_t count = 0;
         if (!ReadRemote(impl_->process.Get(),
-                        begin + profile.opensslLockIndex *
+                        vector.begin + profile.opensslLockIndex *
                                     sizeof(std::uintptr_t),
                         lock) ||
             lock == 0 ||
@@ -1197,8 +1207,9 @@ RuntimeValidationResult Win32FixPlatform::ValidateRuntime(
             impl_->process.Reset();
             return {RuntimeValidationOutcome::MutexLayoutMismatch,
                     ERROR_INVALID_DATA,
-                    L"无法按 Profile 读取 OpenSSL mutex owner/count。"};
+                    L"无法按 Profile 读取 OpenSSL mutex owner/count。", VectorProbeState::ReadFailed};
         }
+        observedMutexCount = count;
         impl_->logger.Event("mutex_layout_probe",
                             "\"owner\":" + std::to_string(owner) +
                                 ",\"count\":" + std::to_string(count));
@@ -1241,7 +1252,7 @@ RuntimeValidationResult Win32FixPlatform::ValidateRuntime(
             (guardEnabled ? std::string("true") : std::string("false")) +
             ",\"writes\":false");
     return {RuntimeValidationOutcome::Valid, ERROR_SUCCESS,
-            L"远程 PE、IAT 和运行库契约校验通过。"};
+            L"远程 PE、IAT 和运行库契约校验通过。", vector.state, observedMutexCount};
 }
 
 GuardInstallResult Win32FixPlatform::InstallGuard(
@@ -1403,30 +1414,25 @@ MonitorSample Win32FixPlatform::ReadMonitorSample(
     const TargetProcess& target, const InstalledGuard& guard) {
     MonitorSample sample;
     if (!impl_->process.Valid() || impl_->targetPid != target.pid ||
-        impl_->activeProfile == nullptr || guard.counterAddress == 0 ||
-        !ReadRemote(impl_->process.Get(), guard.counterAddress,
-                    sample.skippedInvalidUnlocks)) {
+        impl_->activeProfile == nullptr || guard.counterAddress == 0) {
+        sample.counter = sample.discovery = sample.sso = {ReadQuality::Unavailable, ERROR_INVALID_HANDLE};
         return sample;
     }
+    const auto reader = [&](std::uintptr_t address, auto& value) {
+        return ReadRemoteError(impl_->process.Get(), address, value);
+    };
+    // Independent reads retain useful service evidence even if the counter fails.
+    return SampleMonitor(reader, guard.counterAddress,
+        impl_->moduleBase + impl_->activeProfile->discoveryGlobalRva,
+        impl_->moduleBase + impl_->activeProfile->ssoGlobalRva);
+}
 
-    std::uintptr_t discovery = 0;
-    if (ReadRemote(impl_->process.Get(),
-                   impl_->moduleBase +
-                       impl_->activeProfile->discoveryGlobalRva,
-                   discovery) &&
-        discovery != 0 && IsAddressAdditionSafe(discovery, 0x88U)) {
-        ReadRemote(impl_->process.Get(), discovery + 0x88,
-                   sample.discoveryState);
-    }
-    std::uintptr_t sso = 0;
-    if (ReadRemote(impl_->process.Get(),
-                   impl_->moduleBase + impl_->activeProfile->ssoGlobalRva,
-                   sso) &&
-        sso != 0 && IsAddressAdditionSafe(sso, 0x3D8U)) {
-        ReadRemote(impl_->process.Get(), sso + 0x3D8, sample.ssoState);
-    }
-    sample.readable = true;
-    return sample;
+std::optional<std::uint64_t> Win32FixPlatform::ProcessAgeMilliseconds(const TargetProcess& target) {
+    FILETIME now{};
+    GetSystemTimeAsFileTime(&now);
+    const auto ticks = (static_cast<std::uint64_t>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+    if (target.creationTime == 0 || ticks < target.creationTime) return std::nullopt;
+    return (ticks - target.creationTime) / 10000;
 }
 
 HookCleanupOutcome Win32FixPlatform::RestoreOwnedHook(

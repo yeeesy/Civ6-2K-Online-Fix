@@ -478,11 +478,11 @@ constexpr MonitorDecision DecideMonitoring(const MonitorSnapshot& snapshot) noex
     if (snapshot.stopRequested) {
         return MonitorDecision::RestoreAndStop;
     }
-    if (snapshot.skippedInvalidUnlocks > 0 && snapshot.discoveryState >= 4 &&
-        snapshot.ssoState >= 4) {
+    if (snapshot.skippedInvalidUnlocks > 0 && snapshot.discoveryState == 4 &&
+        snapshot.ssoState == 4) {
         return MonitorDecision::DetachAndKeepHook;
     }
-    if (snapshot.discoveryState >= 4 && snapshot.ssoState >= 4) {
+    if (snapshot.discoveryState == 4 && snapshot.ssoState == 4) {
         return MonitorDecision::DetachOnlineWithoutIntervention;
     }
     if (snapshot.timedOut) {
