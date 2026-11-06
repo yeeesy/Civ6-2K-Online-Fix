@@ -868,6 +868,62 @@ int main() {
             civ6fix::kDx12Profile.mutexCountOffset == 0x4CU &&
             civ6fix::kDx12Profile.opensslLockIndex == 18U,
         "DX12 Verified Profile keeps its complete audited contract");
+
+    const auto* dx11Profile1272 = civ6fix::FindBuildProfile(
+        L"CivilizationVI.exe",
+        L"D1A0CFD439E7451BE515F47595CFA0B6B983F56D1FAF4EA434A4CE3B21491EBE");
+    tests.Expect(dx11Profile1272 == &civ6fix::kDx11Profile_1_0_12_72 &&
+                     dx11Profile1272->supportState ==
+                         civ6fix::SupportState::Verified &&
+                     civ6fix::DecideBuildUse(dx11Profile1272) ==
+                         civ6fix::BuildUseDecision::InstallVerifiedGuard,
+                 "exact validated 1.0.12.72 DX11 build selects its verified profile");
+    tests.Expect(
+        civ6fix::kDx11Profile_1_0_12_72.fileSize == 21189480ULL &&
+            civ6fix::kDx11Profile_1_0_12_72.peTimestamp == 0x6AE8EA29U &&
+            civ6fix::kDx11Profile_1_0_12_72.preferredImageBase == 0x140000000ULL &&
+            civ6fix::kDx11Profile_1_0_12_72.imageSize == 0x0370C000U &&
+            civ6fix::kDx11Profile_1_0_12_72.dllCharacteristics == 0x8120U &&
+            civ6fix::kDx11Profile_1_0_12_72.mtxUnlockIatRva == 0x00F97E70U &&
+            civ6fix::kDx11Profile_1_0_12_72.opensslUnlockReturnRva == 0x00BCF1E5U &&
+            civ6fix::kDx11Profile_1_0_12_72.opensslLockVectorRva == 0x03552668U &&
+            civ6fix::kDx11Profile_1_0_12_72.discoveryGlobalRva == 0x03552700U &&
+            civ6fix::kDx11Profile_1_0_12_72.ssoGlobalRva == 0x03552598U &&
+            civ6fix::kDx11Profile_1_0_12_72.mutexOwnerOffset == 0x48U &&
+            civ6fix::kDx11Profile_1_0_12_72.mutexCountOffset == 0x4CU &&
+            civ6fix::kDx11Profile_1_0_12_72.opensslLockIndex == 18U,
+        "1.0.12.72 DX11 Verified Profile keeps its complete audited contract");
+
+    const auto* dx12Profile1272 = civ6fix::FindBuildProfile(
+        L"CivilizationVI_DX12.exe",
+        L"1ADB1A2BCA31F9DB6BE14D6E22D30D2DFCB6DCD8DE3ABD9A81E7BEA396B39417");
+    tests.Expect(dx12Profile1272 == &civ6fix::kDx12Profile_1_0_12_72 &&
+                     dx12Profile1272->supportState ==
+                         civ6fix::SupportState::Verified &&
+                     civ6fix::DecideBuildUse(dx12Profile1272) ==
+                         civ6fix::BuildUseDecision::InstallVerifiedGuard,
+                 "exact validated 1.0.12.72 DX12 build selects its verified profile");
+    tests.Expect(
+        civ6fix::kDx12Profile_1_0_12_72.fileSize == 21420896ULL &&
+            civ6fix::kDx12Profile_1_0_12_72.peTimestamp == 0x6AE8DE31U &&
+            civ6fix::kDx12Profile_1_0_12_72.preferredImageBase == 0x140000000ULL &&
+            civ6fix::kDx12Profile_1_0_12_72.imageSize == 0x0FE5D000U &&
+            civ6fix::kDx12Profile_1_0_12_72.dllCharacteristics == 0x8120U &&
+            civ6fix::kDx12Profile_1_0_12_72.mtxUnlockIatRva == 0x00FA6E78U &&
+            civ6fix::kDx12Profile_1_0_12_72.opensslUnlockReturnRva == 0x00BDD8F5U &&
+            civ6fix::kDx12Profile_1_0_12_72.opensslLockVectorRva == 0x0FCA1FE8U &&
+            civ6fix::kDx12Profile_1_0_12_72.discoveryGlobalRva == 0x0FCA2080U &&
+            civ6fix::kDx12Profile_1_0_12_72.ssoGlobalRva == 0x0FCA1F18U &&
+            civ6fix::kDx12Profile_1_0_12_72.mutexOwnerOffset == 0x48U &&
+            civ6fix::kDx12Profile_1_0_12_72.mutexCountOffset == 0x4CU &&
+            civ6fix::kDx12Profile_1_0_12_72.opensslLockIndex == 18U,
+        "1.0.12.72 DX12 Verified Profile keeps its complete audited contract");
+    tests.Expect(
+        civ6fix::FindBuildProfile(
+            L"CivilizationVI_DX12.exe",
+            L"D1A0CFD439E7451BE515F47595CFA0B6B983F56D1FAF4EA434A4CE3B21491EBE") ==
+            nullptr,
+        "a known hash presented under the wrong executable name is not selected");
     civ6fix::BuildProfile experimentalDx12 = civ6fix::kDx12Profile;
     experimentalDx12.supportState = civ6fix::SupportState::Experimental;
     tests.Expect(

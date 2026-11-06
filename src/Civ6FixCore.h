@@ -113,9 +113,71 @@ inline constexpr BuildProfile kDx12Profile{
     18,
 };
 
-inline constexpr std::array<const BuildProfile*, 2> kKnownBuildProfiles{
+// --- 1.0.12.72 (2026-11-02 构建) ------------------------------------------
+// 数值来源：
+//   mtxUnlockIatRva          —— 由 PE 导入表 MSVCP140.dll!_Mtx_unlock 槽位确定性算出，
+//                               并在游戏进程内核对过实际目标。
+//   opensslUnlockReturnRva   —— DX12 由运行期观测器实测（同一 mutex 上 27 次 count==0
+//                               的解锁全部来自该返回地址）；DX11 由同一唯一代码模式
+//                               定位（该模式在 DX12 上还原出的地址与实测值逐字节一致）。
+//   opensslLockVectorRva /   —— 由该模式中 `mov rax,[rip+d]` 的目标准确给出；
+//   discoveryGlobalRva /       后两者按 vector+0x98 / vector-0xD0 定位（旧 Profile 中的
+//   ssoGlobalRva               同一关系，且两个二进制里三个地址同步 +0x1000），
+//                               并已确认被真实代码以 mov/cmp dword 形式反复引用。
+//   mutexOwnerOffset/Count   —— 0x48/0x4C 未变，运行期以 owner/count 语义实测确认。
+inline constexpr wchar_t kDx11ProfileId_1_0_12_72[] =
+    L"civ6-win64steam-1.0.12.72-dx11";
+
+inline constexpr BuildProfile kDx11Profile_1_0_12_72{
+    kDx11ProfileId_1_0_12_72,
+    L"CivilizationVI.exe",
+    L"D1A0CFD439E7451BE515F47595CFA0B6B983F56D1FAF4EA434A4CE3B21491EBE",
+    Renderer::DirectX11,
+    SupportState::Verified,
+    21189480,
+    0x6AE8EA29,
+    0x140000000,
+    0x0370C000,
+    0x8120,
+    0x00F97E70,
+    0x00BCF1E5,
+    0x03552668,
+    0x03552700,
+    0x03552598,
+    0x48,
+    0x4C,
+    18,
+};
+
+inline constexpr wchar_t kDx12ProfileId_1_0_12_72[] =
+    L"civ6-win64steam-1.0.12.72-dx12";
+
+inline constexpr BuildProfile kDx12Profile_1_0_12_72{
+    kDx12ProfileId_1_0_12_72,
+    L"CivilizationVI_DX12.exe",
+    L"1ADB1A2BCA31F9DB6BE14D6E22D30D2DFCB6DCD8DE3ABD9A81E7BEA396B39417",
+    Renderer::DirectX12,
+    SupportState::Verified,
+    21420896,
+    0x6AE8DE31,
+    0x140000000,
+    0x0FE5D000,
+    0x8120,
+    0x00FA6E78,
+    0x00BDD8F5,
+    0x0FCA1FE8,
+    0x0FCA2080,
+    0x0FCA1F18,
+    0x48,
+    0x4C,
+    18,
+};
+
+inline constexpr std::array<const BuildProfile*, 4> kKnownBuildProfiles{
     &kVerifiedDx11Profile,
     &kDx12Profile,
+    &kDx11Profile_1_0_12_72,
+    &kDx12Profile_1_0_12_72,
 };
 
 inline bool EqualsInsensitive(std::wstring_view left,
