@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -81,11 +82,13 @@ public:
 struct CommandLineOptions {
     bool selfTest = false;
     bool diagnose = false;
+    bool observeCandidate = false;
     bool watchOnly = false;
     bool autoLaunchSteam = false;
     bool noGui = false;
     bool help = false;
     bool version = false;
+    bool profiles = false;
     bool valid = true;
     std::wstring invalidArgument;
 };
@@ -105,6 +108,8 @@ CommandLineOptions ParseCommandLine() {
             options.selfTest = true;
         } else if (argument == L"--diagnose") {
             options.diagnose = true;
+        } else if (argument == L"--observe-candidate") {
+            options.observeCandidate = true;
         } else if (argument == L"--watch-only") {
             options.watchOnly = true;
         } else if (argument == L"--auto-launch-steam") {
@@ -115,6 +120,8 @@ CommandLineOptions ParseCommandLine() {
             options.help = true;
         } else if (argument == L"--version") {
             options.version = true;
+        } else if (argument == L"--print-profiles") {
+            options.profiles = true;
         } else {
             options.valid = false;
             options.invalidArgument.assign(argument);
@@ -126,10 +133,11 @@ CommandLineOptions ParseCommandLine() {
     const int primaryModes = static_cast<int>(options.selfTest) +
                              static_cast<int>(options.diagnose) +
                              static_cast<int>(options.help) +
-                             static_cast<int>(options.version);
+                             static_cast<int>(options.version) + static_cast<int>(options.profiles) +
+                             static_cast<int>(options.observeCandidate);
     if (primaryModes > 1 ||
         ((options.selfTest || options.diagnose || options.help ||
-          options.version) &&
+          options.version || options.profiles || options.observeCandidate) &&
          (options.watchOnly || options.autoLaunchSteam || options.noGui)) ||
         (options.watchOnly && options.autoLaunchSteam)) {
         options.valid = false;
@@ -146,6 +154,7 @@ void PrintHelp() {
     ConsoleLine(L"  --auto-launch-steam 显式请求 Steam 默认启动项；不保证渲染器");
     ConsoleLine(L"  --no-gui            无窗口运行（可与上述启动模式组合）");
     ConsoleLine(L"  --diagnose          只读检查 Steam 安装、进程和 Build Profile");
+    ConsoleLine(L"  --observe-candidate 维护者：监听只读候选，输出服务状态变化，不启动游戏");
     ConsoleLine(L"  --self-test         纯离线核心自检，不枚举或打开游戏进程");
     ConsoleLine(L"  --version           显示版本");
     ConsoleLine(L"  --help, -h          显示本帮助");
@@ -221,6 +230,57 @@ int RunDiagnosis(civ6fix::Logger& logger) {
     return ready ? 0 : 6;
 }
 
+int RunCandidateObservation(civ6fix::Logger& logger) {
+    using namespace civ6fix;
+    Win32FixPlatform platform(logger);
+    const auto prep=platform.Prepare();
+    if(prep.outcome!=PreparationOutcome::Ready){ConsoleLine(L"预检未就绪。");return 6;}
+    ConsoleLine(L"只读监听已启动。请从 Steam 启动要验证的渲染模式。");
+    TargetProcess target;
+    const auto wait=platform.MonotonicMilliseconds();
+    while(platform.MonotonicMilliseconds()-wait<300000) {
+        const auto scan=platform.ScanForTarget();
+        if(scan.outcome==TargetScanOutcome::Failed){ConsoleLine(L"进程检测失败。");return 6;}
+        if(scan.outcome==TargetScanOutcome::Found){target=scan.target;break;}
+        platform.SleepFor(25);
+    }
+    if(!target.profile || target.profile->supportState!=SupportState::ReadOnlyCandidate) {
+        ConsoleLine(L"未检测到已登记的只读候选。");return 6;
+    }
+    const auto valid=platform.ValidateRuntime(target,*target.profile);
+    if(valid.outcome!=RuntimeValidationOutcome::Valid) {
+        ConsoleLine(L"运行时校验未通过；Win32="+std::to_wstring(valid.win32Error));return 6;
+    }
+    ConsoleLine(target.profile->renderer==Renderer::DirectX11?L"DX11 只读观察":L"DX12 只读观察");
+    const auto start=platform.MonotonicMilliseconds();
+    MonitorSample last;
+    std::uint64_t samples=0,ready=0,negative=0;
+    bool waitFailed=false;
+    while(platform.MonotonicMilliseconds()-start<90000) {
+        const auto running=platform.QueryTargetState(target);
+        if(running!=TargetRunState::Running){waitFailed=running==TargetRunState::WaitFailed;break;}
+        std::optional<std::int32_t> count;
+        const auto m=platform.ObserveCandidate(target,count);
+        if(samples==0 || !SessionDiagnostics::SameSample(last,m)) {
+            const auto field=[](FieldRead f,int n) {
+                if(f.quality==ReadQuality::Value)return std::to_wstring(n);
+                if(f.quality==ReadQuality::NotCreated)return std::wstring(L"空指针");
+                return L"未读取（Win32="+std::to_wstring(f.error)+L"）";
+            };
+            ConsoleLine(L"+"+std::to_wstring(platform.MonotonicMilliseconds()-start)+L"ms Discovery="+
+                        field(m.discovery,m.discoveryState)+L" SSO="+field(m.sso,m.ssoState));
+        }
+        ++samples; last=m;
+        if(m.discovery.quality==ReadQuality::Value && m.sso.quality==ReadQuality::Value &&
+           m.discoveryState==4 && m.ssoState==4) ++ready;
+        if(count && *count<0) ++negative;
+        platform.SleepFor(25);
+    }
+    ConsoleLine(L"只读样本="+std::to_wstring(samples)+L"；4/4 样本="+std::to_wstring(ready)+
+                L"；负锁计数样本="+std::to_wstring(negative));
+    return !samples || waitFailed ? 6 : 0; // Exit 0 means observations collected, not repair.
+}
+
 int RunHeadless(civ6fix::Logger& logger, bool autoLaunchSteam) {
     ConsoleObserver observer;
     civ6fix::Win32FixPlatform platform(logger);
@@ -239,7 +299,7 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE previousInstance
     const CommandLineOptions commandLine = ParseCommandLine();
     const bool consoleMode = commandLine.selfTest || commandLine.diagnose ||
                              commandLine.noGui || commandLine.help ||
-                             commandLine.version || !commandLine.valid;
+                             commandLine.version || commandLine.profiles || commandLine.observeCandidate || !commandLine.valid;
     if (consoleMode) {
         EnsureParentConsole();
     }
@@ -256,6 +316,30 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE previousInstance
         ConsoleLine(civ6fix::kProductVersionWide);
         return 0;
     }
+    if (commandLine.profiles) {
+        std::wostringstream out;
+        out << L"[";
+        bool first=true;
+        for (const auto* p:civ6fix::kKnownBuildProfiles) {
+            if (!first) out << L",";
+            first=false;
+            out << L"{\"Id\":\"" << p->id << L"\",\"Renderer\":\"" <<
+                (p->renderer==civ6fix::Renderer::DirectX11?L"DX11":L"DX12") <<
+                L"\",\"SupportState\":\"" << (p->supportState==civ6fix::SupportState::Verified?L"Verified":
+                p->supportState==civ6fix::SupportState::ReadOnlyCandidate?L"ReadOnlyCandidate":
+                p->supportState==civ6fix::SupportState::Experimental?L"Experimental":L"Unsupported") <<
+                L"\",\"SHA256\":\"" << p->sha256 << L"\",\"FileSize\":" << p->fileSize <<
+                L",\"PeTimestamp\":" << p->peTimestamp << L",\"ImageSize\":" << p->imageSize <<
+                L",\"UnlockIat\":" << p->mtxUnlockIatRva << L",\"UnlockReturn\":" << p->opensslUnlockReturnRva <<
+                L",\"LockVector\":" << p->opensslLockVectorRva << L",\"Discovery\":" << p->discoveryGlobalRva <<
+                L",\"SSO\":" << p->ssoGlobalRva << L",\"OwnerOffset\":" << p->mutexOwnerOffset <<
+                L",\"CountOffset\":" << p->mutexCountOffset << L",\"LockIndex\":" << p->opensslLockIndex <<
+                L",\"PreferredBase\":" << p->preferredImageBase << L",\"DllCharacteristics\":" << p->dllCharacteristics <<
+                L",\"Executable\":\"" << p->executableName << L"\",\"CheckUnlockCall\":" << (p->requireDirectUnlockCall ? L"true" : L"false") << L"}";
+        }
+        ConsoleLine(out.str()+L"]");
+        return 0;
+    }
 
     std::unique_ptr<ScopedHandle> instanceMutex;
     if (!commandLine.selfTest && !commandLine.diagnose) {
@@ -267,7 +351,7 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE previousInstance
         const bool alreadyRunning = GetLastError() == ERROR_ALREADY_EXISTS;
         instanceMutex = std::make_unique<ScopedHandle>(mutex);
         if (alreadyRunning) {
-            if (!commandLine.noGui) {
+            if (!commandLine.noGui && !commandLine.observeCandidate) {
                 for (int attempt = 0; attempt < 40; ++attempt) {
                     if (civ6fix::ActivateExistingAppWindow()) {
                         break;
@@ -277,11 +361,12 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE previousInstance
             } else {
                 ConsoleLine(L"已有一个修复会话正在运行；本实例未执行任何操作。");
             }
-            return civ6fix::ExitCodeForExistingInstance(commandLine.noGui);
+            return civ6fix::ExitCodeForExistingInstance(commandLine.noGui || commandLine.observeCandidate);
         }
     }
 
     civ6fix::Logger logger;
+    logger.SetConsoleEcho(!commandLine.observeCandidate);
     if (!logger.Open()) {
         if (consoleMode) {
             ConsoleLine(L"无法创建日志；为安全起见没有继续。");
@@ -306,6 +391,7 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE previousInstance
     if (commandLine.selfTest) {
         return RunOfflineSelfTest(logger);
     }
+    if (commandLine.observeCandidate) return RunCandidateObservation(logger);
     if (commandLine.diagnose) {
         return RunDiagnosis(logger);
     }

@@ -372,6 +372,7 @@ enum class HookCleanupOutcome {
     AlreadyOriginalAndRetainAllocation,
     ForeignOwnerNoWrite,
     UnreadableNoWrite,
+    RestoreAttemptUnconfirmed,
     TargetExited,
 };
 
@@ -442,8 +443,8 @@ constexpr PointerPatchOutcome EvaluatePointerPatch(
 }
 
 constexpr bool CanFreeGuardAfterFailedPublish(
-    const PointerPatchEvidence& evidence, std::uintptr_t observedValue,
-    std::uintptr_t originalValue) noexcept {
+    const PointerPatchEvidence& evidence, std::uintptr_t /* observedValue */,
+    std::uintptr_t /* originalValue */) noexcept {
     if (!evidence.madeWritable) {
         // The pointer write path was never entered.
         return true;
@@ -452,8 +453,9 @@ constexpr bool CanFreeGuardAfterFailedPublish(
         // The guarded write was never attempted.
         return true;
     }
-    return !evidence.writeCompleted && evidence.readBackCompleted &&
-           observedValue == originalValue;
+    // A final snapshot cannot exclude transient publication between the write
+    // attempt and readback. Keep the allocation for the rest of this process.
+    return false;
 }
 
 enum class FailedPublishDisposition {

@@ -16,12 +16,14 @@ std::string HexAddress(std::uintptr_t value);
 class Logger {
 public:
     bool Open();
+    void SetConsoleEcho(bool enabled) noexcept {echo_ = enabled;}
     void Event(std::string_view event, std::string_view fields = {});
 
     const std::filesystem::path& Path() const noexcept { return path_; }
 
 private:
     std::mutex mutex_;
+    bool echo_=true;
     std::filesystem::path path_;
     std::ofstream file_;
 };

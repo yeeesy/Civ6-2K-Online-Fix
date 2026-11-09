@@ -153,7 +153,34 @@ $libraryArgs = @(
 )
 
 $objects = @{}
-foreach ($name in @('FixSession', 'SessionPresentation', 'SteamDiscovery', 'Logger', 'Win32FixPlatform', 'AppWindow')) {
+$csc = Join-Path $visualStudioRoot 'MSBuild/Current/Bin/Roslyn/csc.exe'
+$framework = Join-Path ${env:ProgramFiles(x86)} 'Reference Assemblies/Microsoft/Framework/.NETFramework/v4.8'
+if (-not (Test-Path -LiteralPath (Join-Path $framework 'mscorlib.dll'))) {
+    $framework = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319'
+}
+$updateSource = Join-Path $sourceRoot 'UpdateAgent.cs'
+$updateKey = Join-Path $sourceRoot 'update-public-key.xml'
+$keyText=(Get-Content -LiteralPath $updateKey -Raw).Trim()
+$publicOnly=[regex]::Match($keyText,'^<RSAKeyValue><Modulus>([A-Za-z0-9+/]+={0,2})</Modulus><Exponent>AQAB</Exponent></RSAKeyValue>$')
+if(!$publicOnly.Success -or [Convert]::FromBase64String($publicOnly.Groups[1].Value).Length -lt 384){
+    throw 'Expected a public-only RSA update key of at least 3072 bits.'
+}
+$managedArgs = @('/nologo','/noconfig','/nostdlib+','/optimize+','/deterministic+','/debug-','/warnaserror+','/platform:x64',"/pathmap:$projectRoot=.",
+    "/resource:$updateKey,PublisherKey") + @('mscorlib','System','System.Core','System.Xml','System.Web.Extensions','System.IO.Compression') |
+    ForEach-Object { if ($_ -like 'System*' -or $_ -eq 'mscorlib'){"/reference:$(Join-Path $framework ($_+'.dll'))"}else{$_} }
+& $csc @managedArgs '/target:winexe' "/out:$(Join-Path $generatedRoot 'UpdateAgent.generated.exe')" $updateSource
+if ($LASTEXITCODE -ne 0) { throw 'Update helper compilation failed.' }
+$updateTestCount=0
+if (-not $SkipTests) {
+    $updateTestExe=Join-Path $buildRoot 'UpdateAgentTests.exe'
+    & $csc @managedArgs '/target:exe' '/main:UpdateAgentTests' "/out:$updateTestExe" $updateSource (Join-Path $testRoot 'UpdateAgentTests.cs')
+    if ($LASTEXITCODE -ne 0) {throw 'Update test compilation failed.'}
+    $updateResults=@(& $updateTestExe)
+    if ($LASTEXITCODE -ne 0) {throw 'Offline update tests failed.'}
+    $updateResults | Write-Output
+    $updateTestCount=@($updateResults | Where-Object {$_ -like 'PASS:*'}).Count
+}
+foreach ($name in @('FixSession', 'SessionPresentation', 'FeedbackFile', 'UpdateFlow', 'SteamDiscovery', 'Logger', 'Win32FixPlatform', 'AppWindow')) {
     $object = Join-Path $buildRoot "$name.obj"
     $compileArgs = @($commonCompilerArgs) + @(
         '/c'
@@ -176,6 +203,9 @@ $testArgs = @($commonCompilerArgs) + @(
     $objects['FixSession']
     $objects['SessionPresentation']
     $objects['SteamDiscovery']
+    $objects['FeedbackFile']
+    $objects['Logger']
+    'shell32.lib'
     '/link'
 ) + $libraryArgs
 
@@ -192,7 +222,7 @@ if (-not $SkipTests) {
     if ($testExitCode -ne 0) {
         throw "Unit tests failed with exit code $testExitCode"
     }
-    $testCount = @($testOutput | Where-Object { $_ -like 'PASS:*' }).Count
+    $testCount = $updateTestCount + @($testOutput | Where-Object { $_ -like 'PASS:*' }).Count
     foreach ($scriptTest in @(
         'VerifyHashes.Tests.ps1'
         'VersionSource.Tests.ps1'
@@ -247,7 +277,9 @@ $appArgs = @($commonCompilerArgs) + @(
     $objects['SteamDiscovery']
     $objects['Logger']
     $objects['Win32FixPlatform']
+    $objects['FeedbackFile']
     $objects['AppWindow']
+    $objects['UpdateFlow']
     $resourceFile
     '/link'
     '/SUBSYSTEM:WINDOWS'
@@ -281,6 +313,9 @@ if ($versionInfo.FileVersion -ne $productVersion -or
     $versionInfo.ProductVersion -ne $productVersion) {
     throw "Executable version resource does not match version.json: file=$($versionInfo.FileVersion), product=$($versionInfo.ProductVersion), expected=$productVersion"
 }
+$profileDump = @(& $appExe --print-profiles | Out-String)
+if ($LASTEXITCODE -ne 0 -or $profileDump.Count -eq 0) {throw 'Compiled profile registry unavailable.'}
+$profilesFromExe = @(($profileDump -join '') | ConvertFrom-Json)
 $manifest = [ordered]@{
     Product = 'Civ6 2K Online Fix'
     Version = $productVersion
@@ -294,32 +329,7 @@ $manifest = [ordered]@{
     Executable = $appItem.Name
     Length = $appItem.Length
     SHA256 = (Get-FileHash -LiteralPath $appExe -Algorithm SHA256).Hash
-    BuildProfiles = @(
-        [ordered]@{
-            Id = 'civ6-win64steam-1.0.12.68-dx11'
-            Renderer = 'DX11'
-            SupportState = 'Verified'
-            SHA256 = 'E7450823CC8E00468CFF7B9D7B97C63140EAE38AE1D774BA4EFA437556C42D63'
-        }
-        [ordered]@{
-            Id = 'civ6-win64steam-1.0.12.68-dx12'
-            Renderer = 'DX12'
-            SupportState = 'Verified'
-            SHA256 = 'C2C3D40B86260A541D8A4D38CB70D50D3406AE1DE374AFC382D1E42BC1342F1E'
-        }
-        [ordered]@{
-            Id = 'civ6-win64steam-1.0.12.72-dx11'
-            Renderer = 'DX11'
-            SupportState = 'Verified'
-            SHA256 = 'D1A0CFD439E7451BE515F47595CFA0B6B983F56D1FAF4EA434A4CE3B21491EBE'
-        }
-        [ordered]@{
-            Id = 'civ6-win64steam-1.0.12.72-dx12'
-            Renderer = 'DX12'
-            SupportState = 'Verified'
-            SHA256 = '1ADB1A2BCA31F9DB6BE14D6E22D30D2DFCB6DCD8DE3ABD9A81E7BEA396B39417'
-        }
-    )
+    BuildProfiles = $profilesFromExe
     MSVCVersion = $msvcVersion
     WindowsSDKVersion = $sdkVersion
     NativeAnalysis = [bool]$Analyze

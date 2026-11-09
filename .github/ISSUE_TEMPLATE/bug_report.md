@@ -5,31 +5,11 @@ title: "[Bug] "
 labels: bug
 ---
 
-## Environment
+## 发生了什么？
 
-- Tool version and EXE SHA-256:
-- Windows version:
-- Steam game version:
-- Renderer actually launched: DX11 / DX12 / unknown
-- Mode: GUI / watch-only / no-gui / diagnose
+请简单说明游戏内 2K 显示在线还是离线、能否进入联机，以及这个问题是每次出现还是偶发。
 
-## What happened
+## 工具反馈文件
 
-Describe the observed and expected behavior. State whether the UI ever said that a write occurred.
-
-## Reproduction
-
-Start from a fully stopped game and list exact steps.
-
-## Diagnostics
-
-- Tool final result and game menu's actual online/offline state:
-- Reached the main menu: yes / no / unknown
-- Frequency: always / intermittent / once
-- Did the tool start listening before the game was launched?
-- Mods enabled: yes / no / unknown
-- Cache/database changes already tried: none / describe only the action, filename and anonymized relative location. Do not delete anything to reproduce this report.
-
-Paste the GUI's sanitized “复制脱敏诊断” summary when available. Do not paste raw JSONL. If `--diagnose` output is essential, include only the smallest relevant excerpt after removing local usernames/paths, PIDs, memory/module addresses, account identifiers, and unrelated hashes. Never include passwords, Steam/2K tokens, or a game executable.
-
-For diagnostic format 2, include the complete text (result code, field read quality, timings and bounded timeline), not only the last three numbers. If before/after reports already exist, include both and describe what changed. Do not upload SQLite databases or account data. A timeout category is an observation, not a root-cause diagnosis. See `docs/DIAGNOSTICS.md` in the source tree.
+1.2 用户：点“反馈问题”，把打开的脱敏 TXT 作为附件拖到这里。1.1 用户可以粘贴“复制脱敏诊断”的全文。
+请勿上传原始 JSONL、数据库或游戏程序。

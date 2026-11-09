@@ -31,6 +31,8 @@ enum class SessionResult {
     CancelledOwnedHookRestoredAllocationRetained,
     CancelledOwnedHookRestoredProtectionUncertainAllocationRetained,
     CancelledHookNotOwnedNoWrite,
+    CancelledOwnershipUnreadable,
+    CancelledRestoreUnconfirmed,
     ExistingGameNoWrite,
     ProcessScanFailedNoWrite,
     InstallationNotFoundNoWrite,
@@ -102,6 +104,8 @@ enum class PreparationOutcome {
 struct PreparationResult {
     PreparationOutcome outcome = PreparationOutcome::InstallationNotFound;
     std::wstring detail;
+    std::vector<FileObservation> gameFiles;
+    std::uint32_t scanError=0;
 };
 
 struct TargetProcess {
@@ -186,6 +190,7 @@ public:
     virtual TargetRunState QueryTargetState(const TargetProcess& target) = 0;
     virtual MonitorSample ReadMonitorSample(const TargetProcess& target,
                                              const InstalledGuard& guard) = 0;
+    virtual IatOwnership InspectHook(const TargetProcess&, const InstalledGuard&) {return IatOwnership::Unreadable;}
     virtual HookCleanupOutcome RestoreOwnedHook(
         const TargetProcess& target, const InstalledGuard& guard) = 0;
     virtual std::uint64_t MonotonicMilliseconds() = 0;
@@ -210,6 +215,7 @@ public:
 
     SessionResult Run();
     void RequestStop() noexcept;
+    void RequestStopBeforeWrite() noexcept {preWriteStop_.store(true,std::memory_order_release);}
     void RequestSteamLaunch() noexcept;
     bool StopRequested() const noexcept;
 
@@ -226,8 +232,12 @@ private:
     ISessionObserver& observer_;
     SessionOptions options_;
     std::atomic_bool stopRequested_{false};
+    std::atomic_bool preWriteStop_{false};
     std::atomic_bool steamLaunchRequested_{false};
     SessionDiagnostics diagnostics_;
+    InstalledGuard installedForReport_;
+    std::vector<DiagnosticEvent> feedbackEvents_;
+    std::uint64_t omittedTail_ = 0;
     std::uint64_t startedMs_ = 0;
     std::uint64_t phaseStartedMs_ = 0;
     std::optional<std::uint64_t> monitorStartedMs_;

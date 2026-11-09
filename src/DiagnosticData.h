@@ -107,6 +107,15 @@ VectorProbe ReadLockVector(Reader&& reader, std::uintptr_t address,
 }
 
 template <typename Reader>
+MonitorSample SampleCandidateServices(Reader&& reader, std::uintptr_t discoveryAddress,
+                                      std::uintptr_t ssoAddress) {
+    MonitorSample sample;
+    sample.discovery = ReadServiceField(reader, discoveryAddress, 0x88U, sample.discoveryState);
+    sample.sso = ReadServiceField(reader, ssoAddress, 0x3D8U, sample.ssoState);
+    return sample;
+}
+
+template <typename Reader>
 MonitorSample SampleMonitor(Reader&& reader, std::uintptr_t counterAddress,
                              std::uintptr_t discoveryAddress, std::uintptr_t ssoAddress) {
     MonitorSample sample;
@@ -134,7 +143,34 @@ struct DiagnosticEvent {
     MonitorSample sample;
 };
 
+// Fixed renderers + 32 digest bytes only. Paths, arbitrary manifest strings
+// and identifiers from the machine have no representation in the feedback file.
+struct FileObservation {
+    Renderer renderer{};
+    std::uint64_t bytes=0;
+    std::array<std::uint8_t,32> digest{};
+    bool complete=false;
+    bool recognized=false;
+};
+inline bool ParseFileDigest(std::wstring_view hex,std::array<std::uint8_t,32>& out) noexcept {
+    if(hex.size()!=64)return false;
+    const auto nibble=[](wchar_t c)->int{
+        if(c>=L'0' && c<=L'9')return c-L'0';
+        if(c>=L'A' && c<=L'F')return 10+c-L'A';
+        if(c>=L'a' && c<=L'f')return 10+c-L'a';
+        return -1;
+    };
+    std::array<std::uint8_t,32> parsed{};
+    for(std::size_t i=0;i<parsed.size();++i){
+        const int a=nibble(hex[2*i]),b=nibble(hex[2*i+1]);
+        if(a<0 || b<0)return false;
+        parsed[i]=static_cast<std::uint8_t>((a<<4)|b);
+    }
+    out=parsed;return true;
+}
+
 struct SessionDiagnostics {
+    std::vector<FileObservation> gameFiles;
     bool available = false;
     std::uint64_t elapsedMs = 0;
     std::array<std::uint64_t, 8> phaseMs{};
@@ -150,6 +186,7 @@ struct SessionDiagnostics {
     std::uint32_t installError = 0;
     std::uint32_t scanError = 0;
     bool guardInstalled = false;
+    std::optional<IatOwnership> finalOwnership;
     std::optional<std::uint64_t> processAgeAtGuardMs;
     VectorProbeState mutexProbe = VectorProbeState::NotAttempted;
     std::optional<std::int32_t> mutexCountBeforeGuard;
@@ -168,6 +205,7 @@ struct SessionDiagnostics {
     std::vector<DiagnosticEvent> events;
     std::size_t eventCount = 0;
     std::uint64_t omittedEvents = 0;
+    std::uint64_t omittedTail = 0;
 
     static bool SameField(const FieldRead& a, const FieldRead& b) noexcept {
         return a.quality == b.quality && a.error == b.error;
