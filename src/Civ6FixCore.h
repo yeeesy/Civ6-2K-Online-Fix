@@ -3,6 +3,7 @@
 #include <array>
 #include <cwctype>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <string_view>
 #include <vector>
@@ -65,7 +66,17 @@ struct BuildProfile {
     std::uint32_t mutexOwnerOffset;
     std::uint32_t mutexCountOffset;
     std::uint32_t opensslLockIndex;
+    bool requireDirectUnlockCall = false;
 };
+
+inline bool MatchesIndirectUnlockCall(const std::array<std::uint8_t,6>& bytes,
+                                      std::uintptr_t returnRva,std::uintptr_t iatRva) noexcept {
+    if (returnRva<6 || returnRva>UINT32_MAX || iatRva>UINT32_MAX ||
+        bytes[0]!=0xff || bytes[1]!=0x15) return false;
+    std::int32_t disp{};
+    std::memcpy(&disp,bytes.data()+2,sizeof(disp));
+    return static_cast<std::int64_t>(returnRva)+disp == static_cast<std::int64_t>(iatRva);
+}
 
 inline constexpr BuildProfile kVerifiedDx11Profile{
     L"civ6-win64steam-1.0.12.68-dx11",
@@ -114,19 +125,12 @@ inline constexpr BuildProfile kDx12Profile{
 };
 
 // --- 1.0.12.72 (2026-11-02 构建) ------------------------------------------
-// PR #2 贡献者报告的定位依据；尚未由维护者在新版上独立验证。
-// 对全局量的 dword 引用不能证明它是 SampleMonitor 需要的 64 位服务对象指针。
-// 数值来源：
-//   mtxUnlockIatRva          —— 由 PE 导入表 MSVCP140.dll!_Mtx_unlock 槽位确定性算出，
-//                               并在游戏进程内核对过实际目标。
-//   opensslUnlockReturnRva   —— DX12 由运行期观测器实测（同一 mutex 上 27 次 count==0
-//                               的解锁全部来自该返回地址）；DX11 由同一唯一代码模式
-//                               定位（该模式在 DX12 上还原出的地址与实测值逐字节一致）。
-//   opensslLockVectorRva /   —— 由该模式中 `mov rax,[rip+d]` 的目标准确给出；
-//   discoveryGlobalRva /       后两者按 vector+0x98 / vector-0xD0 定位（旧 Profile 中的
-//   ssoGlobalRva               同一关系，且两个二进制里三个地址同步 +0x1000），
-//                               并已确认被真实代码以 mov/cmp dword 形式反复引用。
-//   mutexOwnerOffset/Count   —— 0x48/0x4C 未变，运行期以 owner/count 语义实测确认。
+// TUcookie (PR #2): exact PE identities and renderer-specific hook locations.
+// On both official images the wrapper resolves to the system _Mtx_unlock slot;
+// the live call instruction is checked again before installation. On the
+// maintainer's machine both renderers reproduced the negative count without
+// intervention and reached 4/4 with one intercepted unlock; owned restoration
+// was verified independently in a separate cold start for each renderer.
 inline constexpr wchar_t kDx11ProfileId_1_0_12_72[] =
     L"civ6-win64steam-1.0.12.72-dx11";
 
@@ -135,7 +139,7 @@ inline constexpr BuildProfile kDx11Profile_1_0_12_72{
     L"CivilizationVI.exe",
     L"D1A0CFD439E7451BE515F47595CFA0B6B983F56D1FAF4EA434A4CE3B21491EBE",
     Renderer::DirectX11,
-    SupportState::ReadOnlyCandidate,
+    SupportState::Verified,
     21189480,
     0x6AE8EA29,
     0x140000000,
@@ -149,6 +153,7 @@ inline constexpr BuildProfile kDx11Profile_1_0_12_72{
     0x48,
     0x4C,
     18,
+    true,
 };
 
 inline constexpr wchar_t kDx12ProfileId_1_0_12_72[] =
@@ -159,7 +164,7 @@ inline constexpr BuildProfile kDx12Profile_1_0_12_72{
     L"CivilizationVI_DX12.exe",
     L"1ADB1A2BCA31F9DB6BE14D6E22D30D2DFCB6DCD8DE3ABD9A81E7BEA396B39417",
     Renderer::DirectX12,
-    SupportState::ReadOnlyCandidate,
+    SupportState::Verified,
     21420896,
     0x6AE8DE31,
     0x140000000,
@@ -173,6 +178,7 @@ inline constexpr BuildProfile kDx12Profile_1_0_12_72{
     0x48,
     0x4C,
     18,
+    true,
 };
 
 inline constexpr std::array<const BuildProfile*, 4> kKnownBuildProfiles{

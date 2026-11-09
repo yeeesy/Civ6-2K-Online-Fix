@@ -451,6 +451,12 @@ int main() {
     TestRunner tests;
     TestDetailedDiagnostics(tests);
     TestSessionReview(tests);
+    const std::array<std::uint8_t,6> goodCall={0xff,0x15,0x20,0,0,0};
+    auto wrongCall=goodCall;wrongCall[1]=0x25;
+    tests.Expect(civ6fix::MatchesIndirectUnlockCall(goodCall,0x1000,0x1020) &&
+                 !civ6fix::MatchesIndirectUnlockCall(wrongCall,0x1000,0x1020) &&
+                 !civ6fix::MatchesIndirectUnlockCall(goodCall,0x1000,0x1010),
+                 "runtime instruction must call the exact imported unlock slot");
 
     const auto steamLibraries = civ6fix::ParseSteamLibraryFolders(
         R"VDF("libraryfolders"
@@ -874,10 +880,10 @@ int main() {
         L"D1A0CFD439E7451BE515F47595CFA0B6B983F56D1FAF4EA434A4CE3B21491EBE");
     tests.Expect(dx11Profile1272 == &civ6fix::kDx11Profile_1_0_12_72 &&
                      dx11Profile1272->supportState ==
-                         civ6fix::SupportState::ReadOnlyCandidate &&
+                         civ6fix::SupportState::Verified && dx11Profile1272->requireDirectUnlockCall &&
                      civ6fix::DecideBuildUse(dx11Profile1272) ==
-                         civ6fix::BuildUseDecision::ObserveCandidateReadOnly,
-                 "exact 1.0.12.72 DX11 build is recognized without write permission");
+                         civ6fix::BuildUseDecision::InstallVerifiedGuard,
+                 "exact 1.0.12.72 DX11 contract requires live unlock instruction validation");
     tests.Expect(
         civ6fix::kDx11Profile_1_0_12_72.fileSize == 21189480ULL &&
             civ6fix::kDx11Profile_1_0_12_72.peTimestamp == 0x6AE8EA29U &&
@@ -899,10 +905,10 @@ int main() {
         L"1ADB1A2BCA31F9DB6BE14D6E22D30D2DFCB6DCD8DE3ABD9A81E7BEA396B39417");
     tests.Expect(dx12Profile1272 == &civ6fix::kDx12Profile_1_0_12_72 &&
                      dx12Profile1272->supportState ==
-                         civ6fix::SupportState::ReadOnlyCandidate &&
+                         civ6fix::SupportState::Verified && dx12Profile1272->requireDirectUnlockCall &&
                      civ6fix::DecideBuildUse(dx12Profile1272) ==
-                         civ6fix::BuildUseDecision::ObserveCandidateReadOnly,
-                 "exact 1.0.12.72 DX12 build is recognized without write permission");
+                         civ6fix::BuildUseDecision::InstallVerifiedGuard,
+                 "exact 1.0.12.72 DX12 contract requires live unlock instruction validation");
     tests.Expect(
         civ6fix::kDx12Profile_1_0_12_72.fileSize == 21420896ULL &&
             civ6fix::kDx12Profile_1_0_12_72.peTimestamp == 0x6AE8DE31U &&
@@ -925,10 +931,12 @@ int main() {
             nullptr,
         "a known hash presented under the wrong executable name is not selected");
     civ6fix::BuildProfile experimentalDx12 = civ6fix::kDx12Profile;
-    for (const auto* candidate : {dx11Profile1272, dx12Profile1272}) {
+    for (const auto* profile : {dx11Profile1272, dx12Profile1272}) {
+        auto readOnly=*profile;
+        readOnly.supportState=civ6fix::SupportState::ReadOnlyCandidate;
         std::vector<std::string> order;
         ListenerOrderPlatform platform(order);
-        platform.targetProfile = candidate;
+        platform.targetProfile = &readOnly;
         SilentObserver observer;
         civ6fix::FixSession session(platform, observer);
         tests.Expect(session.Run() == civ6fix::SessionResult::CandidateDetectedReadOnly &&

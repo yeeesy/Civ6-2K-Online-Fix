@@ -310,13 +310,13 @@ $manifest = [ordered]@{
         [ordered]@{
             Id = 'civ6-win64steam-1.0.12.72-dx11'
             Renderer = 'DX11'
-            SupportState = 'ReadOnlyCandidate'
+            SupportState = 'Verified'
             SHA256 = 'D1A0CFD439E7451BE515F47595CFA0B6B983F56D1FAF4EA434A4CE3B21491EBE'
         }
         [ordered]@{
             Id = 'civ6-win64steam-1.0.12.72-dx12'
             Renderer = 'DX12'
-            SupportState = 'ReadOnlyCandidate'
+            SupportState = 'Verified'
             SHA256 = '1ADB1A2BCA31F9DB6BE14D6E22D30D2DFCB6DCD8DE3ABD9A81E7BEA396B39417'
         }
     )

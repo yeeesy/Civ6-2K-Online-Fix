@@ -391,6 +391,7 @@ bool WriteRemote(HANDLE process, std::uintptr_t address, const void* data,
 }
 
 bool IsExecutableProtection(DWORD protection) {
+    if ((protection & PAGE_GUARD) != 0) return false;
     protection &= 0xFFU;
     return protection == PAGE_EXECUTE || protection == PAGE_EXECUTE_READ ||
            protection == PAGE_EXECUTE_READWRITE ||
@@ -435,6 +436,16 @@ struct RemoteModule {
     std::wstring name;
     std::filesystem::path path;
 };
+
+bool UnlockCallMatches(HANDLE process,std::uintptr_t base,const BuildProfile& profile) {
+    if(!profile.requireDirectUnlockCall)return true;
+    const auto ret=profile.opensslUnlockReturnRva;
+    if(ret<6 || !IsRvaSpanWithinImage(profile.imageSize,ret-6,6) || !IsAddressAdditionSafe(base,ret))return false;
+    std::array<std::uint8_t,6> bytes{};
+    return IsCommittedImageSpan(process,base+ret-6,bytes.size(),base,true) &&
+           ReadRemote(process,base+ret-6,bytes) &&
+           MatchesIndirectUnlockCall(bytes,ret,profile.mtxUnlockIatRva);
+}
 
 bool IsExpectedSystemRuntimePath(const std::filesystem::path& path,
                                  std::wstring_view moduleName) {
@@ -1083,6 +1094,10 @@ RuntimeValidationResult Win32FixPlatform::ValidateRuntime(
                 ERROR_INVALID_ADDRESS,
                 L"Build Profile 远程地址没有落在预期的已提交映像区域。"};
     }
+    if(!UnlockCallMatches(impl_->process.Get(),mainModule->base,profile)){
+        impl_->process.Reset();
+        return {RuntimeValidationOutcome::PeIdentityMismatch,ERROR_INVALID_DATA,L"解锁调用指令不匹配。"};
+    }
     std::uintptr_t originalTarget = 0;
     std::filesystem::path runtimePath;
     const std::uint64_t iatWaitStarted = GetTickCount64();
@@ -1266,7 +1281,8 @@ GuardInstallResult Win32FixPlatform::InstallGuard(
     }
 
     std::uintptr_t currentIat = 0;
-    if (!ReadRemote(impl_->process.Get(), impl_->validatedIat, currentIat) ||
+    if (!UnlockCallMatches(impl_->process.Get(),impl_->moduleBase,profile) ||
+        !ReadRemote(impl_->process.Get(), impl_->validatedIat, currentIat) ||
         currentIat != impl_->validatedOriginal) {
         return {GuardInstallOutcome::FailedNoHook, {}, ERROR_INVALID_STATE,
                 L"安装前 IAT 所有权已变化。"};

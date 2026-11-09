@@ -8,13 +8,13 @@
 
 ## 当前版本
 
-公开版 `1.1.0` 可从 [Releases](https://github.com/yeeesy/Civ6-2K-Online-Fix/releases) 下载。本地候选 `1.1.1-rc.1` 采用 [TUcookie 在 PR #2 的贡献](https://github.com/yeeesy/Civ6-2K-Online-Fix/pull/2) 识别 `1.0.12.72` 的两个 EXE；这两个候选只做只读校验，不安装修复。
+公开下载请见 [Releases](https://github.com/yeeesy/Civ6-2K-Online-Fix/releases)。源码采用 [TUcookie 在 PR #2 的贡献](https://github.com/yeeesy/Civ6-2K-Online-Fix/pull/2) 适配 `1.0.12.72`，两个渲染器均已完成实机修复与撤销验证。
 
 | 渲染器 | 状态 | 工具行为 |
 | --- | --- | --- |
 | 1.0.12.68 DX11 | 已验证 | 精确匹配并通过运行时校验后可修复 |
 | 1.0.12.68 DX12 | 已验证 | 精确匹配并通过运行时校验后可修复 |
-| 1.0.12.72 DX11 / DX12 | 只读候选 | 识别和校验，不写入 |
+| 1.0.12.72 DX11 / DX12 | 已验证 | 精确匹配并通过运行时校验后可修复 |
 | 未知或更新后的游戏构建 | 不支持 | 拒绝处理 |
 
 ## 原理
@@ -81,4 +81,4 @@ Civ6_2K_Online_Fix.exe --self-test          纯离线自检
 
 ## English summary
 
-Civ6 2K Online Fix is an unofficial Windows helper for a specific local initialization failure in the Steam version of Civilization VI. Verified profiles for 1.0.12.68 retain repair support; the 1.0.12.72 profiles in this candidate are read-only. See the [project and releases](https://github.com/yeeesy/Civ6-2K-Online-Fix).
+Civ6 2K Online Fix supports verified Steam DX11 and DX12 executables for game builds 1.0.12.68 and 1.0.12.72. See the [project and releases](https://github.com/yeeesy/Civ6-2K-Online-Fix).
