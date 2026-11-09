@@ -307,6 +307,18 @@ $manifest = [ordered]@{
             SupportState = 'Verified'
             SHA256 = 'C2C3D40B86260A541D8A4D38CB70D50D3406AE1DE374AFC382D1E42BC1342F1E'
         }
+        [ordered]@{
+            Id = 'civ6-win64steam-1.0.12.72-dx11'
+            Renderer = 'DX11'
+            SupportState = 'Verified'
+            SHA256 = 'D1A0CFD439E7451BE515F47595CFA0B6B983F56D1FAF4EA434A4CE3B21491EBE'
+        }
+        [ordered]@{
+            Id = 'civ6-win64steam-1.0.12.72-dx12'
+            Renderer = 'DX12'
+            SupportState = 'Verified'
+            SHA256 = '1ADB1A2BCA31F9DB6BE14D6E22D30D2DFCB6DCD8DE3ABD9A81E7BEA396B39417'
+        }
     )
     MSVCVersion = $msvcVersion
     WindowsSDKVersion = $sdkVersion

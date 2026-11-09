@@ -3,6 +3,7 @@
 #include <array>
 #include <cwctype>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <string_view>
 #include <vector>
@@ -65,7 +66,17 @@ struct BuildProfile {
     std::uint32_t mutexOwnerOffset;
     std::uint32_t mutexCountOffset;
     std::uint32_t opensslLockIndex;
+    bool requireDirectUnlockCall = false;
 };
+
+inline bool MatchesIndirectUnlockCall(const std::array<std::uint8_t,6>& bytes,
+                                      std::uintptr_t returnRva,std::uintptr_t iatRva) noexcept {
+    if (returnRva<6 || returnRva>UINT32_MAX || iatRva>UINT32_MAX ||
+        bytes[0]!=0xff || bytes[1]!=0x15) return false;
+    std::int32_t disp{};
+    std::memcpy(&disp,bytes.data()+2,sizeof(disp));
+    return static_cast<std::int64_t>(returnRva)+disp == static_cast<std::int64_t>(iatRva);
+}
 
 inline constexpr BuildProfile kVerifiedDx11Profile{
     L"civ6-win64steam-1.0.12.68-dx11",
@@ -113,9 +124,68 @@ inline constexpr BuildProfile kDx12Profile{
     18,
 };
 
-inline constexpr std::array<const BuildProfile*, 2> kKnownBuildProfiles{
+// --- 1.0.12.72 (2026-11-02 构建) ------------------------------------------
+// TUcookie (PR #2): exact PE identities and renderer-specific hook locations.
+// On both official images the wrapper resolves to the system _Mtx_unlock slot;
+// the live call instruction is checked again before installation. On the
+// maintainer's machine both renderers reproduced the negative count without
+// intervention and reached 4/4 with one intercepted unlock; owned restoration
+// was verified independently in a separate cold start for each renderer.
+inline constexpr wchar_t kDx11ProfileId_1_0_12_72[] =
+    L"civ6-win64steam-1.0.12.72-dx11";
+
+inline constexpr BuildProfile kDx11Profile_1_0_12_72{
+    kDx11ProfileId_1_0_12_72,
+    L"CivilizationVI.exe",
+    L"D1A0CFD439E7451BE515F47595CFA0B6B983F56D1FAF4EA434A4CE3B21491EBE",
+    Renderer::DirectX11,
+    SupportState::Verified,
+    21189480,
+    0x6AE8EA29,
+    0x140000000,
+    0x0370C000,
+    0x8120,
+    0x00F97E70,
+    0x00BCF1E5,
+    0x03552668,
+    0x03552700,
+    0x03552598,
+    0x48,
+    0x4C,
+    18,
+    true,
+};
+
+inline constexpr wchar_t kDx12ProfileId_1_0_12_72[] =
+    L"civ6-win64steam-1.0.12.72-dx12";
+
+inline constexpr BuildProfile kDx12Profile_1_0_12_72{
+    kDx12ProfileId_1_0_12_72,
+    L"CivilizationVI_DX12.exe",
+    L"1ADB1A2BCA31F9DB6BE14D6E22D30D2DFCB6DCD8DE3ABD9A81E7BEA396B39417",
+    Renderer::DirectX12,
+    SupportState::Verified,
+    21420896,
+    0x6AE8DE31,
+    0x140000000,
+    0x0FE5D000,
+    0x8120,
+    0x00FA6E78,
+    0x00BDD8F5,
+    0x0FCA1FE8,
+    0x0FCA2080,
+    0x0FCA1F18,
+    0x48,
+    0x4C,
+    18,
+    true,
+};
+
+inline constexpr std::array<const BuildProfile*, 4> kKnownBuildProfiles{
     &kVerifiedDx11Profile,
     &kDx12Profile,
+    &kDx11Profile_1_0_12_72,
+    &kDx12Profile_1_0_12_72,
 };
 
 inline bool EqualsInsensitive(std::wstring_view left,
