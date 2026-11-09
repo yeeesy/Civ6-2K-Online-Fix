@@ -16,6 +16,18 @@ if (-not $checksumFull.StartsWith(
         $packageRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw "Checksum file escaped the package: $checksumFull"
 }
+$queue=[Collections.Generic.Stack[string]]::new()
+$queue.Push($PSScriptRoot)
+$packageEntries=[Collections.Generic.List[object]]::new()
+while($queue.Count) {
+    $dir=$queue.Pop()
+    if(((Get-Item -LiteralPath $dir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Package contains a reparse point.'}
+    foreach($item in Get-ChildItem -LiteralPath $dir -Force){
+        if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Package contains a reparse point.'}
+        $packageEntries.Add($item)
+        if($item.PSIsContainer){$queue.Push($item.FullName)}
+    }
+}
 $listedFiles = [Collections.Generic.HashSet[string]]::new(
     [StringComparer]::OrdinalIgnoreCase)
 $verified = 0
@@ -52,13 +64,6 @@ if ($verified -eq 0) {
     throw 'No package files were listed in the checksum file.'
 }
 
-$packageEntries = @(Get-ChildItem -LiteralPath $PSScriptRoot -Recurse -Force)
-$reparsePoint = $packageEntries | Where-Object {
-    ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
-} | Select-Object -First 1
-if ($null -ne $reparsePoint) {
-    throw "Package contains a reparse point: $($reparsePoint.FullName)"
-}
 $actualFiles = @($packageEntries | Where-Object {
     -not $_.PSIsContainer -and
     -not $_.FullName.Equals(

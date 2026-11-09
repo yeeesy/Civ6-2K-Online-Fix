@@ -91,32 +91,25 @@ std::string HexAddress(std::uintptr_t value) {
 }
 
 bool Logger::Open() {
-    std::error_code error;
-    std::filesystem::path logDirectory = ExecutableDirectory() / L"logs";
-    std::filesystem::create_directories(logDirectory, error);
-    if (error) {
-        std::vector<wchar_t> localAppData(32768);
-        const DWORD length = GetEnvironmentVariableW(
-            L"LOCALAPPDATA", localAppData.data(),
-            static_cast<DWORD>(localAppData.size()));
-        if (length == 0 || length >= localAppData.size()) {
-            return false;
-        }
-        logDirectory = std::filesystem::path(localAppData.data()) /
-                       L"Civ6_2K_Online_Fix" / L"logs";
-        error.clear();
-        std::filesystem::create_directories(logDirectory, error);
-        if (error) {
-            return false;
-        }
-    }
-
-    const std::wstring filename = L"Civ6_2K_Online_Fix_" + FilenameTimestamp() +
-                                  L"_" +
+    const std::wstring filename = L"Civ6_2K_Online_Fix_" + FilenameTimestamp() + L"_" +
                                   std::to_wstring(GetCurrentProcessId()) + L".jsonl";
-    path_ = logDirectory / filename;
-    file_.open(path_, std::ios::binary | std::ios::out | std::ios::app);
-    return file_.is_open();
+    const auto openIn = [&](const std::filesystem::path& directory) {
+        std::error_code error;
+        std::filesystem::create_directories(directory, error);
+        if (error) return false;
+        file_.clear();
+        const auto candidate = directory / filename;
+        file_.open(candidate, std::ios::binary | std::ios::out | std::ios::app);
+        if (!file_.is_open()) return false;
+        path_ = candidate;
+        return true;
+    };
+    if (openIn(ExecutableDirectory() / L"logs")) return true;
+    std::vector<wchar_t> localAppData(32768);
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData.data(),
+                                            static_cast<DWORD>(localAppData.size()));
+    if (!n || n >= localAppData.size()) return false;
+    return openIn(std::filesystem::path(localAppData.data()) / L"Civ6_2K_Online_Fix" / L"logs");
 }
 
 void Logger::Event(std::string_view event, std::string_view fields) {
@@ -129,7 +122,7 @@ void Logger::Event(std::string_view event, std::string_view fields) {
     }
     line << '}';
     const std::string text = line.str();
-    std::cout << text << std::endl;
+    if(echo_) std::cout << text << std::endl;
     if (file_.is_open()) {
         file_ << text << '\n';
         file_.flush();

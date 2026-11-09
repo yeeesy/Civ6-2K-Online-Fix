@@ -2,6 +2,10 @@
 #include "FixSession.h"
 #include "SessionStatusMailbox.h"
 #include "SessionPresentation.h"
+#include "FeedbackFile.h"
+#include <chrono>
+#include <fstream>
+#include <iterator>
 #include "SteamDiscovery.h"
 
 #include <cstdint>
@@ -220,6 +224,73 @@ private:
     bool requested_ = false;
 };
 
+class CancelLaunchObserver final : public civ6fix::ISessionObserver {
+public:
+    civ6fix::FixSession* session = nullptr;
+    void OnSessionStatus(const civ6fix::SessionStatus& status) override {
+        if (status.phase == civ6fix::SessionPhase::Listening) session->RequestStop();
+    }
+};
+
+void TestFailureBoundaries(TestRunner& tests) {
+    using namespace civ6fix;
+    const std::array<std::uint8_t,6> direct={0xff,0x15,0x20,0,0,0};
+    auto wrong=direct;wrong[1]=0x25;
+    tests.Expect(MatchesIndirectUnlockCall(direct,0x1000,0x1020) &&
+                 !MatchesIndirectUnlockCall(wrong,0x1000,0x1020) &&
+                 !MatchesIndirectUnlockCall(direct,0x1000,0x1010),
+                 "the new build must return immediately from a call to the verified unlock IAT slot");
+    std::vector<std::string> order;
+    ListenerOrderPlatform platform(order);
+    CancelLaunchObserver cancel;
+    SessionOptions options;
+    options.launchViaSteam = true;
+    FixSession session(platform, cancel, options);
+    cancel.session = &session;
+    tests.Expect(session.Run() == SessionResult::CancelledBeforeWrite && order.empty(),
+                 "cancel at listening prevents a pending Steam launch");
+    ListenerOrderPlatform stopped(order);
+    stopped.installOutcome = GuardInstallOutcome::Installed;
+    stopped.cleanupOutcome = HookCleanupOutcome::UnreadableNoWrite;
+    StopAtMonitoringObserver observer;
+    FixSession monitor(stopped, observer);
+    observer.session = &monitor;
+    tests.Expect(monitor.Run() != SessionResult::CancelledHookNotOwnedNoWrite && stopped.restoreCalls == 1,
+                 "unreadable ownership is not evidence of a foreign hook");
+    tests.Expect(!CanFreeGuardAfterFailedPublish({true,false,true,true,false,true},0x1000,0x1000),
+                 "an attempted IAT write with uncertain history never hot-frees the guard");
+    ListenerOrderPlatform changing(order);
+    changing.installOutcome = GuardInstallOutcome::Installed;
+    changing.monitorReadsBeforeExit = 81;
+    for (int i=0; i<81; ++i) changing.monitorSamples.emplace_back(true,0,2+(i%2),2);
+    CapturingObserver history;
+    FixSession trace(changing,history);
+    trace.Run();
+    tests.Expect(history.last.diagnostics.events.size()==81 && history.last.diagnostics.omittedEvents==0,
+                 "final feedback preserves every observed transition beyond the live display limit");
+    const auto tmp = std::filesystem::temp_directory_path() /
+        ("civ6-feedback-test-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    if (!std::filesystem::create_directory(tmp)) {tests.Expect(false,"exclusive feedback fixture");return;}
+    history.last.detail=L"PRIVATE-LOCAL-DETAIL";
+    const auto first = SaveFeedbackFile(tmp/"feedback",L"1.2.0-rc.1",history.last,false);
+    const auto second = SaveFeedbackFile(tmp/"feedback",L"1.2.0-rc.1",history.last,false);
+    std::ifstream file(second,std::ios::binary);
+    const std::string bytes((std::istreambuf_iterator<char>(file)),{});
+    file.close();
+    tests.Expect(!first.empty() && second!=first && second.extension()==L".txt" &&
+        bytes.rfind("\xEF\xBB\xBF",0)==0 && bytes.find("PRIVATE-LOCAL-DETAIL")==std::string::npos &&
+        bytes.find("TargetExited")!=std::string::npos &&
+        LastFeedbackFile(tmp/"feedback")==second,
+        "a complete private-safe UTF-8 report can be retrieved on a later run without overwriting another");
+    tests.Expect(SaveFeedbackFile(tmp/"feedback",L"../bad",history.last,false).empty() &&
+                 SaveFeedbackFile(tmp/"feedback",L"1.2.0",SessionStatus{},false).empty(),
+                 "report export rejects unsafe filenames and unfinished terminal evidence");
+    std::error_code ec;
+    if (!first.empty()) std::filesystem::remove(first,ec);
+    if (!second.empty()) std::filesystem::remove(second,ec);
+    std::filesystem::remove(tmp/"feedback",ec); std::filesystem::remove(tmp,ec);
+}
+
 void TestDetailedDiagnostics(TestRunner& tests) {
     using namespace civ6fix;
     tests.Expect(std::wstring(ClipboardFeedback(false)) == L"复制失败" &&
@@ -296,6 +367,15 @@ void TestDetailedDiagnostics(TestRunner& tests) {
                      counterFailure.counter.error == 299 && counterFailure.discoveryState == 4 &&
                      counterFailure.ssoState == 4,
                  "counter failure does not suppress independent service readings");
+    int candidateReads = 0;
+    const auto observation = SampleCandidateServices([&](std::uintptr_t address, auto& value) -> std::uint32_t {
+        ++candidateReads;
+        value = address == 0x2000 || address == 0x3000 ? 0x4000 : 4;
+        return 0;
+    }, 0x2000, 0x3000);
+    tests.Expect(candidateReads == 4 && observation.counter.quality == ReadQuality::NotSampled &&
+                     observation.discoveryState == 4 && observation.ssoState == 4 && !CompleteSample(observation),
+                 "read-only observations never read or invent an installed guard counter");
     {
         std::vector<std::string> order;
         ListenerOrderPlatform platform(order);
@@ -447,17 +527,7 @@ void TestSessionReview(TestRunner& tests) {
 
 }
 
-int main() {
-    TestRunner tests;
-    TestDetailedDiagnostics(tests);
-    TestSessionReview(tests);
-    const std::array<std::uint8_t,6> goodCall={0xff,0x15,0x20,0,0,0};
-    auto wrongCall=goodCall;wrongCall[1]=0x25;
-    tests.Expect(civ6fix::MatchesIndirectUnlockCall(goodCall,0x1000,0x1020) &&
-                 !civ6fix::MatchesIndirectUnlockCall(wrongCall,0x1000,0x1020) &&
-                 !civ6fix::MatchesIndirectUnlockCall(goodCall,0x1000,0x1010),
-                 "runtime instruction must call the exact imported unlock slot");
-
+void TestDiscoveryAndPresentation(TestRunner& tests) {
     const auto steamLibraries = civ6fix::ParseSteamLibraryFolders(
         R"VDF("libraryfolders"
 {
@@ -637,6 +707,14 @@ int main() {
             retryLaunchControl.label == L"重新检测",
         "the shared secondary button becomes Retry only for retryable terminal results");
 
+}
+
+int main() {
+    TestRunner tests;
+    TestFailureBoundaries(tests);
+    TestDetailedDiagnostics(tests);
+    TestSessionReview(tests);
+    TestDiscoveryAndPresentation(tests);
     std::vector<std::string> startupOrder;
     ListenerOrderObserver listenerObserver(startupOrder);
     ListenerOrderPlatform listenerPlatform(startupOrder);
@@ -931,8 +1009,8 @@ int main() {
             nullptr,
         "a known hash presented under the wrong executable name is not selected");
     civ6fix::BuildProfile experimentalDx12 = civ6fix::kDx12Profile;
-    for (const auto* profile : {dx11Profile1272, dx12Profile1272}) {
-        auto readOnly=*profile;
+    for (const auto* verified : {dx11Profile1272, dx12Profile1272}) {
+        auto readOnly=*verified;
         readOnly.supportState=civ6fix::SupportState::ReadOnlyCandidate;
         std::vector<std::string> order;
         ListenerOrderPlatform platform(order);

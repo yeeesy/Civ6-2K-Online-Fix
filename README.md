@@ -8,7 +8,7 @@
 
 ## 当前版本
 
-公开下载请见 [Releases](https://github.com/yeeesy/Civ6-2K-Online-Fix/releases)。源码采用 [TUcookie 在 PR #2 的贡献](https://github.com/yeeesy/Civ6-2K-Online-Fix/pull/2) 适配 `1.0.12.72`，两个渲染器均已完成实机修复与撤销验证。
+**1.2.0** 已适配 Windows Steam 版《文明 VI》`1.0.12.72` 的 DX11 和 DX12，并保留对上一构建的支持。感谢 [TUcookie 的适配贡献](https://github.com/yeeesy/Civ6-2K-Online-Fix/pull/2)。从 [Releases](https://github.com/yeeesy/Civ6-2K-Online-Fix/releases) 下载 ZIP，解压后运行。
 
 | 渲染器 | 状态 | 工具行为 |
 | --- | --- | --- |
@@ -48,7 +48,9 @@ Civ6_2K_Online_Fix.exe --self-test          纯离线自检
 
 如需让无参数启动也自动请求 Steam，可将 `Civ6_2K_Online_Fix.ini.example` 复制为同目录下的 `Civ6_2K_Online_Fix.ini`，再把 `auto_launch_steam` 改为 `1`。默认值为 `0`。
 
-报告普通问题时，优先使用 GUI 的“复制脱敏诊断”。`--diagnose` 输出和原始 JSONL 可能包含本机路径、PID、内存地址及文件哈希；工具不会自动上传这些资料，请勿将原始日志直接发布到公开 Issue。
+从 1.2 起，检测结束后点击 **反馈问题**，会打开本次完整的脱敏 TXT，可直接作为附件发送。重新打开工具后可从 **报告文件夹** 找到以前的报告；1.1 用户仍可用“复制脱敏诊断”。
+
+**检查更新**只比较工具版本。发现新的正式版后，选择“是”即可下载、验证并更新工具。正在监控时，更新会在本轮会话结束后安装，配置和反馈文件保留。首次从旧版升级到带此功能的版本，仍需下载一次 ZIP。
 
 `1.1.0` 的增强诊断提供读取质量、相对时间线和超时分类，详见 [脱敏诊断与超时反馈](docs/DIAGNOSTICS.md)。旧版 `1.0.0` 仍采用简要报告格式，请以报告中的诊断格式为准。超时只表示未在期限内确认同时就绪，不等于数据库损坏；不要因此直接删除 SQLite 文件。
 
@@ -81,4 +83,4 @@ Civ6_2K_Online_Fix.exe --self-test          纯离线自检
 
 ## English summary
 
-Civ6 2K Online Fix supports verified Steam DX11 and DX12 executables for game builds 1.0.12.68 and 1.0.12.72. See the [project and releases](https://github.com/yeeesy/Civ6-2K-Online-Fix).
+Civ6 2K Online Fix is an unofficial Windows helper for a specific local initialization failure in the Steam version of Civilization VI. Version 1.2 supports verified DX11 and DX12 builds of 1.0.12.68 and 1.0.12.72, exports shareable text reports and supports signed tool updates. See the [project and releases](https://github.com/yeeesy/Civ6-2K-Online-Fix).

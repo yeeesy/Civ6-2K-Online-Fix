@@ -26,6 +26,9 @@ public:
     TargetRunState QueryTargetState(const TargetProcess& target) override;
     MonitorSample ReadMonitorSample(const TargetProcess& target,
                                      const InstalledGuard& guard) override;
+    IatOwnership InspectHook(const TargetProcess& target,const InstalledGuard& guard) override;
+    // Maintainer observation: only after exact read-only candidate validation.
+    MonitorSample ObserveCandidate(const TargetProcess& target, std::optional<std::int32_t>& lockCount);
     HookCleanupOutcome RestoreOwnedHook(
         const TargetProcess& target, const InstalledGuard& guard) override;
     std::uint64_t MonotonicMilliseconds() override;

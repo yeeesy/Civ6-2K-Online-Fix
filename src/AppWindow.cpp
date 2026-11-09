@@ -7,6 +7,8 @@
 #include <shellapi.h>
 
 #include "AppWindow.h"
+#include "FeedbackFile.h"
+#include "UpdateFlow.h"
 
 #include "Logger.h"
 #include "ProductIdentity.generated.h"
@@ -27,8 +29,6 @@ namespace {
 
 constexpr wchar_t kWindowTitle[] = L"Civ6 2K Online Fix";
 constexpr wchar_t kHeadingText[] = L"文明 VI · 2K 在线修复";
-constexpr wchar_t kSafetyText[] =
-    L"安全边界：仅精确 Verified 构建可写入 · DX11/DX12 自动识别 · 不修改游戏文件或账号数据";
 constexpr UINT kSessionStatusMessage = WM_APP + 1;
 constexpr UINT kSessionCompletedMessage = WM_APP + 2;
 
@@ -36,11 +36,12 @@ constexpr int kStatusId = 1001;
 constexpr int kDetailId = 1002;
 constexpr int kProfileId = 1003;
 constexpr int kProgressId = 1004;
-constexpr int kSafetyId = 1005;
 constexpr int kPrimaryId = 1101;
 constexpr int kSecondaryId = 1102;
 constexpr int kLogsId = 1103;
 constexpr int kCopyId = 1104;
+constexpr int kUpdateId = 1105;
+constexpr UINT_PTR kUpdateTimer=17;
 
 HMENU ControlId(int identifier) {
     return reinterpret_cast<HMENU>(static_cast<INT_PTR>(identifier));
@@ -79,6 +80,8 @@ const char* ResultName(SessionResult result) {
         return "cancelled_owned_hook_restored_protection_uncertain_allocation_retained";
     case SessionResult::CancelledHookNotOwnedNoWrite:
         return "cancelled_hook_not_owned_no_write";
+    case SessionResult::CancelledOwnershipUnreadable: return "cancelled_ownership_unreadable";
+    case SessionResult::CancelledRestoreUnconfirmed: return "cancelled_restore_unconfirmed";
     case SessionResult::ExistingGameNoWrite: return "existing_game_no_write";
     case SessionResult::ProcessScanFailedNoWrite:
         return "process_scan_failed_no_write";
@@ -109,36 +112,9 @@ const char* ResultName(SessionResult result) {
     return "unknown";
 }
 
-std::wstring ProfileText(const SessionStatus& status,
-                         bool steamLaunchRequested) {
-    if (status.profile == nullptr) {
-        return steamLaunchRequested
-                   ? L"模式：已请求 Steam 默认启动项 · 实际渲染器以进程为准"
-                   : L"模式：仅监听（推荐） · 请在 Steam 选择 DX11 / DX12";
-    }
-    const wchar_t* renderer = status.profile->renderer == Renderer::DirectX11
-                                  ? L"DirectX 11"
-                                  : L"DirectX 12";
-    const wchar_t* support = L"Unsupported";
-    switch (status.profile->supportState) {
-    case SupportState::Verified: support = L"Verified"; break;
-    case SupportState::Experimental: support = L"Experimental"; break;
-    case SupportState::ReadOnlyCandidate: support = L"ReadOnlyCandidate"; break;
-    case SupportState::Unsupported: break;
-    }
-    std::wostringstream text;
-    text << L"已识别：" << renderer << L" · " << support << L" · PID "
-         << status.pid;
-    if (status.phase == SessionPhase::Monitoring) {
-        const auto& sample = status.diagnostics.latest;
-        text << L" · 拦截 "
-             << (sample.counter.quality == ReadQuality::Value ? std::to_wstring(status.skippedInvalidUnlocks) : L"?")
-             << L" · Discovery "
-             << (sample.discovery.quality == ReadQuality::Value ? std::to_wstring(status.discoveryState) : L"?")
-             << L" · SSO "
-             << (sample.sso.quality == ReadQuality::Value ? std::to_wstring(status.ssoState) : L"?");
-    }
-    return text.str();
+std::wstring ProfileText(const SessionStatus& status, bool) {
+    if (!status.profile) return {};
+    return status.profile->renderer==Renderer::DirectX11 ? L"DirectX 11" : L"DirectX 12";
 }
 
 COLORREF ToneColor(PresentationTone tone) {
@@ -152,28 +128,6 @@ COLORREF ToneColor(PresentationTone tone) {
     return RGB(55, 65, 81);
 }
 
-bool SetClipboardText(HWND owner, const std::wstring& text) {
-    const SIZE_T bytes = (text.size() + 1) * sizeof(wchar_t);
-    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (memory == nullptr) return false;
-    void* destination = GlobalLock(memory);
-    if (destination == nullptr) {
-        GlobalFree(memory);
-        return false;
-    }
-    CopyMemory(destination, text.c_str(), bytes);
-    GlobalUnlock(memory);
-    // Allocate and populate before emptying the user's clipboard.
-    if (!OpenClipboard(owner)) {
-        GlobalFree(memory);
-        return false;
-    }
-    const bool copied = EmptyClipboard() != FALSE &&
-                        SetClipboardData(CF_UNICODETEXT, memory) != nullptr;
-    CloseClipboard();
-    if (!copied) GlobalFree(memory);
-    return copied;
-}
 
 class WindowObserver final : public ISessionObserver {
 public:
@@ -268,7 +222,9 @@ public:
                 (IsWindowVisible(window_) ? std::string("true")
                                           : std::string("false")) +
                 ",\"win32\":" + std::to_string(GetLastError()));
+        if(!CompleteUpdateHandoff()){DestroyWindow(window_);return false;}
         StartSession();
+        BeginUpdateCheck(false);
         return true;
     }
 
@@ -314,6 +270,7 @@ private:
             HandleCommand(LOWORD(wParam));
             return 0;
         case WM_CLOSE:
+            if(updates_.Applying()) return 0;
             if (workerRunning_) {
                 closingRequested_ = true;
                 RequestStop();
@@ -348,13 +305,18 @@ private:
             if (worker_.joinable()) {
                 worker_.join();
             }
+            DrainStatusMailbox();
             ApplySessionControls(latestStatus_);
             SendMessageW(progress_, PBM_SETMARQUEE, FALSE, 0);
             ShowWindow(progress_, SW_HIDE);
+            if (updateReady_) {ApplyUpdateWhenIdle();return 0;}
             if (closingRequested_) {
                 DestroyWindow(window_);
             }
             return 0;
+        case WM_TIMER:
+            if(wParam==kUpdateTimer){PollUpdate();return 0;}
+            return DefWindowProcW(window_,message,wParam,lParam);
         case WM_DESTROY:
             PostQuitMessage(0);
             return 0;
@@ -381,13 +343,13 @@ private:
         title_ = CreateWindowExW(0, L"STATIC", kHeadingText,
                                  WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX,
                                  0, 0, 0, 0, window_, nullptr, instance_, nullptr);
-        status_ = CreateWindowExW(0, L"STATIC", L"正在准备安全会话…",
+        status_ = CreateWindowExW(0, L"STATIC", L"正在检测游戏",
                                   WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX,
                                   0, 0, 0, 0, window_,
                                   ControlId(kStatusId), instance_,
                                   nullptr);
         detail_ = CreateWindowExW(0, L"STATIC",
-                                  L"界面不会阻塞监听；无需点击确认。",
+                                  L"",
                                   WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX,
                                   0, 0, 0, 0, window_,
                                   ControlId(kDetailId), instance_,
@@ -401,9 +363,9 @@ private:
             WS_CHILD | WS_VISIBLE | PBS_MARQUEE | PBS_SMOOTH, 0, 0, 0, 0,
             window_, ControlId(kProgressId), instance_, nullptr);
         safety_ = CreateWindowExW(
-            0, L"STATIC", kSafetyText,
+            0, L"STATIC", L"",
             WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX, 0, 0, 0, 0, window_,
-            ControlId(kSafetyId), instance_, nullptr);
+            nullptr, instance_, nullptr);
         primaryButton_ = CreateWindowExW(
             0, L"BUTTON", L"取消本次", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
                                               BS_PUSHBUTTON,
@@ -415,20 +377,22 @@ private:
             0, 0, 0, 0, window_, ControlId(kSecondaryId), instance_,
             nullptr);
         logsButton_ = CreateWindowExW(
-            0, L"BUTTON", L"打开日志", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+            0, L"BUTTON", L"报告文件夹", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
                                             BS_PUSHBUTTON,
             0, 0, 0, 0, window_, ControlId(kLogsId), instance_,
             nullptr);
         copyButton_ = CreateWindowExW(
-            0, L"BUTTON", L"复制脱敏诊断", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+            0, L"BUTTON", L"反馈问题", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
                                             BS_PUSHBUTTON,
             0, 0, 0, 0, window_, ControlId(kCopyId), instance_,
             nullptr);
+        updateButton_=CreateWindowExW(0,L"BUTTON",L"检查更新",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,
+            0,0,0,0,window_,ControlId(kUpdateId),instance_,nullptr);
 
         SendMessageW(title_, WM_SETFONT, reinterpret_cast<WPARAM>(titleFont_), TRUE);
         SendMessageW(status_, WM_SETFONT, reinterpret_cast<WPARAM>(statusFont_), TRUE);
         for (HWND control : {detail_, profile_, safety_, primaryButton_, secondaryButton_,
-                             logsButton_, copyButton_}) {
+                             logsButton_, copyButton_, updateButton_}) {
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(bodyFont_),
                          TRUE);
         }
@@ -439,7 +403,8 @@ private:
     void LayoutControls(int width, int height) {
         const int margin = 34;
         const int contentWidth = std::max(100, width - margin * 2);
-        MoveWindow(title_, margin, 25, contentWidth, 42, TRUE);
+        MoveWindow(title_, margin, 25, std::max(10,contentWidth-130), 42, TRUE);
+        MoveWindow(updateButton_,width-margin-116,25,116,32,TRUE);
         MoveWindow(status_, margin, 82, contentWidth, 34, TRUE);
         MoveWindow(detail_, margin, 126, contentWidth, 90, TRUE);
         MoveWindow(profile_, margin, 228, contentWidth, 28, TRUE);
@@ -504,18 +469,24 @@ private:
                 StartSession();
             }
             break;
+        case kUpdateId:
+            BeginUpdateCheck(true);
+            break;
         case kLogsId: {
-            const std::filesystem::path folder = logger_.Path().parent_path();
-            ShellExecuteW(window_, L"open", folder.c_str(), nullptr, nullptr,
-                          SW_SHOWNORMAL);
+            const auto folder=FeedbackDirectory();
+            std::error_code ec;
+            if (!folder.empty() && std::filesystem::is_directory(folder,ec))
+                ShellExecuteW(window_, L"open", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             break;
         }
         case kCopyId: {
-            const bool copied = SetClipboardText(
-                window_, BuildShareableDiagnostic(
-                             kProductVersionWide, latestStatus_,
-                             steamLaunchRequested_));
-            SetWindowTextW(copyButton_, ClipboardFeedback(copied));
+            std::error_code ec;
+            if ((feedback_.empty() || !std::filesystem::is_regular_file(feedback_,ec)) &&
+                latestStatus_.phase == SessionPhase::Completed)
+                feedback_=SaveFeedbackFile(FeedbackDirectory(),CIV6FIX_VERSION_SEMVER_WIDE,latestStatus_,steamLaunchRequested_);
+            if (feedback_.empty()) {SetWindowTextW(detail_,L"反馈文件未能保存。");break;}
+            if (reinterpret_cast<INT_PTR>(ShellExecuteW(window_,L"open",feedback_.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)
+                SetWindowTextW(detail_,L"报告已保存，请点“报告文件夹”查看。");
             break;
         }
         default:
@@ -525,7 +496,12 @@ private:
 
     void ApplyStatus(const SessionStatus& status) {
         latestStatus_ = status;
-        latestPresentation_ = PresentSessionStatus(status);
+        latestPresentation_ = PresentPlayerStatus(status);
+        if (status.phase == SessionPhase::Completed)
+            feedback_=SaveFeedbackFile(FeedbackDirectory(),CIV6FIX_VERSION_SEMVER_WIDE,status,steamLaunchRequested_);
+        SetWindowTextW(copyButton_, status.phase==SessionPhase::Completed ? L"反馈问题" : L"上次反馈");
+        EnableWindow(copyButton_,status.phase==SessionPhase::Completed || !feedback_.empty());
+        EnableWindow(logsButton_,!feedback_.empty());
         ApplySessionControls(status);
         tone_ = latestPresentation_.tone;
         SetWindowTextW(status_, latestPresentation_.headline.c_str());
@@ -569,7 +545,7 @@ private:
     }
 
     void StartSession() {
-        if (workerRunning_) {
+        if (workerRunning_ || updateReady_ || updates_.Applying()) {
             return;
         }
         if (worker_.joinable()) {
@@ -589,8 +565,8 @@ private:
         startingStatus.phase = SessionPhase::Preparing;
         // Discard any previous-session wake-ups before accepting new diagnostics.
         while (statusMailbox_.TryPop().has_value()) {}
+        feedback_=LastFeedbackFile(FeedbackDirectory());
         ApplyStatus(startingStatus);
-        SetWindowTextW(copyButton_, L"复制脱敏诊断");
         ShowWindow(progress_, SW_SHOW);
         SendMessageW(progress_, PBM_SETMARQUEE, TRUE, 35);
 
@@ -601,6 +577,7 @@ private:
             {
                 std::lock_guard<std::mutex> lock(sessionMutex_);
                 activeSession_ = &session;
+                if(updatePausePending_) session.RequestStopBeforeWrite();
                 if (stopPending_) {
                     session.RequestStop();
                 }
@@ -627,6 +604,53 @@ private:
         }
     }
 
+    void BeginUpdateCheck(bool manual) {
+        if(updates_.Busy() || updateReady_) return;
+        updateManual_=manual;
+        if(!updates_.Check(manual)) {
+            if(manual) SetWindowTextW(safety_,L"暂时无法检查更新。");
+            return;
+        }
+        EnableWindow(updateButton_,FALSE);
+        SetTimer(window_,kUpdateTimer,250,nullptr);
+        if(manual)SetWindowTextW(safety_,L"正在检查更新…");
+    }
+    void ApplyUpdateWhenIdle() {
+        if(workerRunning_ || !updateReady_) return;
+        if(updates_.Apply()) {
+            SetWindowTextW(safety_,L"正在更新工具…");
+            EnableWindow(primaryButton_,FALSE);EnableWindow(secondaryButton_,FALSE);
+        } else {updateReady_=false;
+            {std::lock_guard<std::mutex> lock(sessionMutex_);updatePausePending_=false;}
+            SetWindowTextW(safety_,L"更新未能安装，当前版本可继续使用。");
+            EnableWindow(updateButton_,TRUE);KillTimer(window_,kUpdateTimer);}
+    }
+    void PollUpdate() {
+        const auto e=updates_.Poll();
+        if(e==UpdateEvent::None)return;
+        if(e==UpdateEvent::Armed) {KillTimer(window_,kUpdateTimer);DestroyWindow(window_);return;}
+        if(e==UpdateEvent::Available) {
+            const std::wstring msg=L"发现工具新版本 "+updates_.Version()+L"，是否更新？";
+            if(MessageBoxW(window_,msg.c_str(),kWindowTitle,MB_YESNO|MB_ICONQUESTION)==IDYES) {
+                updateManual_=true;
+                if(updates_.Download()){SetWindowTextW(safety_,L"正在下载更新…");return;}
+                SetWindowTextW(safety_,L"更新下载失败。");
+            } else SetWindowTextW(safety_,L"");
+        } else if(e==UpdateEvent::Downloaded) {
+            updateReady_=true;
+            SetWindowTextW(safety_,L"更新已下载，本次检测结束后安装。");
+            {std::lock_guard<std::mutex> lock(sessionMutex_);
+             updatePausePending_=true; if(activeSession_) activeSession_->RequestStopBeforeWrite();}
+            ApplyUpdateWhenIdle();return;
+        } else if(e==UpdateEvent::Failed) {
+            updateReady_=false;
+            {std::lock_guard<std::mutex> lock(sessionMutex_);updatePausePending_=false;}
+            ApplySessionControls(latestStatus_);
+            if(updateManual_)SetWindowTextW(safety_,L"更新未能完成，当前版本可继续使用。");
+        } else if(e==UpdateEvent::Current && updateManual_)SetWindowTextW(safety_,L"已是最新版本。");
+        KillTimer(window_,kUpdateTimer);EnableWindow(updateButton_,TRUE);
+    }
+
     void RequestSteamLaunch() {
         std::lock_guard<std::mutex> lock(sessionMutex_);
         steamLaunchPending_ = true;
@@ -649,6 +673,11 @@ private:
     HWND secondaryButton_ = nullptr;
     HWND logsButton_ = nullptr;
     HWND copyButton_ = nullptr;
+    HWND updateButton_ = nullptr;
+    UpdateFlow updates_;
+    bool updateReady_=false;
+    bool updatePausePending_=false;
+    bool updateManual_=false;
     HFONT titleFont_ = nullptr;
     HFONT statusFont_ = nullptr;
     HFONT bodyFont_ = nullptr;
@@ -657,6 +686,7 @@ private:
     SessionPrimaryAction primaryAction_ = SessionPrimaryAction::RequestStop;
     SessionLaunchAction secondaryAction_ = SessionLaunchAction::None;
     SessionStatus latestStatus_;
+    std::filesystem::path feedback_;
     SessionPresentation latestPresentation_;
     SessionStatusMailbox statusMailbox_;
     std::thread worker_;

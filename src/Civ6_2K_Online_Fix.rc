@@ -37,3 +37,4 @@ BEGIN
 END
 
 1 RT_MANIFEST "ProductManifest.generated.manifest"
+101 RCDATA "UpdateAgent.generated.exe"

@@ -43,6 +43,7 @@ const wchar_t* ResultCode(SessionResult result) noexcept {
     RESULT_CODE(CancelledOwnedHookRestoredAllocationRetained);
     RESULT_CODE(CancelledOwnedHookRestoredProtectionUncertainAllocationRetained);
     RESULT_CODE(CancelledHookNotOwnedNoWrite); RESULT_CODE(ExistingGameNoWrite);
+    RESULT_CODE(CancelledOwnershipUnreadable); RESULT_CODE(CancelledRestoreUnconfirmed);
     RESULT_CODE(ProcessScanFailedNoWrite); RESULT_CODE(InstallationNotFoundNoWrite);
     RESULT_CODE(UnsupportedBuildNoWrite); RESULT_CODE(HashFailedNoWrite);
     RESULT_CODE(SteamLaunchFailedNoWrite); RESULT_CODE(TargetWaitTimedOutNoWrite);
@@ -61,7 +62,7 @@ const wchar_t* QualityName(ReadQuality quality) noexcept {
     switch (quality) {
     case ReadQuality::NotSampled: return L"未采样";
     case ReadQuality::Value: return L"可读";
-    case ReadQuality::NotCreated: return L"对象尚未创建";
+    case ReadQuality::NotCreated: return L"对象指针为空";
     case ReadQuality::PointerReadFailed: return L"对象指针读取失败";
     case ReadQuality::ValueReadFailed: return L"数值读取失败";
     case ReadQuality::InvalidAddress: return L"地址范围不合法";
@@ -106,7 +107,7 @@ const wchar_t* TimeoutCategory(const SessionDiagnostics& d) noexcept {
     if (badRead(d.latest.discovery.quality) || badRead(d.latest.sso.quality))
         return L"T2-STATE-UNREADABLE：末次服务状态读取不完整";
     if (d.latest.discovery.quality == ReadQuality::NotCreated || d.latest.sso.quality == ReadQuality::NotCreated)
-        return L"T3-OBJECT-NOT-CREATED：末次服务对象尚未创建";
+        return L"T3-OBJECT-NOT-CREATED：末次采样的服务指针为空";
     if (d.latest.skippedInvalidUnlocks != 0)
         return L"T4-INTERCEPTED-NOT-READY：已拦截，但未确认同时就绪";
     return L"T5-NO-INTERCEPTION-NOT-READY：未观察到拦截，未确认同时就绪";
@@ -119,7 +120,7 @@ void WriteField(std::wostringstream& text, const wchar_t* name,
     text << name << L"：";
     if (field.quality == ReadQuality::Value) text << value << L"；";
     text << QualityName(field.quality) << L"；Win32=" << field.error
-         << L"；成功/对象未创建/读取失败=" << stats.values << L"/" << stats.absent << L"/" << stats.failures;
+         << L"；成功/空指针/读取失败=" << stats.values << L"/" << stats.absent << L"/" << stats.failures;
     if (stats.values != 0) {
         text << L"；最近有效=" << lastGood << L"（距快照 "
              << (elapsed >= stats.lastValueAtMs ? elapsed - stats.lastValueAtMs : 0) << L" 毫秒）";
@@ -144,6 +145,15 @@ void WriteEvidence(std::wostringstream& text, const SessionStatus& status) {
         text << L"采集：尚未开始；以下旧式数值无读取质量和时间证据\r\n";
         return;
     }
+    for (const auto& file:d.gameFiles) {
+        text << L"游戏文件：" << (file.renderer==Renderer::DirectX11?L"CivilizationVI.exe":L"CivilizationVI_DX12.exe");
+        if (file.complete) {
+            text << L"；字节=" << file.bytes << L"；SHA-256=";
+            for(auto x:file.digest)text << L"0123456789ABCDEF"[x>>4] << L"0123456789ABCDEF"[x&15];
+            text << (file.recognized?L"；已识别":L"；未登记");
+        } else text << L"；文件身份读取未完成";
+        text << L"\r\n";
+    }
     text << L"最后活动阶段：" << PhaseCode(d.lastActivePhase) << L"\r\n"
          << L"会话耗时：" << d.elapsedMs << L" 毫秒\r\n阶段耗时（毫秒）：";
     for (std::size_t i = 0; i < d.phaseMs.size() - 1; ++i)
@@ -156,6 +166,15 @@ void WriteEvidence(std::wostringstream& text, const SessionStatus& status) {
          << L"\r\nGuard 安装：" << (d.installAttempted ? InstallName(d.installOutcome) : L"未执行")
          << L"；Win32=" << d.installError << L"\r\n";
     if (d.guardInstalled) {
+        text << L"结束时保护位置：";
+        if (!d.finalOwnership) text << L"未采集";
+        else switch (*d.finalOwnership) {
+        case IatOwnership::OwnedBySession: text << L"仍指向本次保护"; break;
+        case IatOwnership::OriginalTarget: text << L"指向原始函数"; break;
+        case IatOwnership::ForeignOwner: text << L"指向其他目标"; break;
+        case IatOwnership::Unreadable: text << L"无法确认"; break;
+        }
+        text << L"\r\n";
         text << L"安装时游戏进程年龄：";
         if (d.processAgeAtGuardMs) text << *d.processAgeAtGuardMs << L" 毫秒（系统时钟估算，不能证明介入足够早）";
         else text << L"未知";
@@ -193,6 +212,7 @@ void WriteEvidence(std::wostringstream& text, const SessionStatus& status) {
         text << L" S="; WriteEventField(text, event.sample.sso, event.sample.ssoState);
         text << L"\r\n";
     }
+    if (d.omittedTail) text << L"超出采集上限，末尾未记录的变化数：" << d.omittedTail << L"\r\n";
     text << L"说明：仅状态 4 按已验证就绪处理；其他数值原样记录，未建立阶段含义映射。三个字段为顺序读取，非原子快照。分类是排查入口，不是根因判定。\r\n"
          << L"SQLite/网络/账号状态：本工具未检查；不会据此判断数据库损坏或排除网络问题。\r\n"
          << L"反馈请补充：游戏内实际在线/离线；是否到主菜单；每次还是偶发；是否做过缓存操作（只给文件名和脱敏相对位置）；如已有前后报告请同时提供。不要为采集报告删除数据库。\r\n";
@@ -241,6 +261,12 @@ SessionPresentation PresentSessionResult(SessionResult result) {
         return {L"停止时发现所有权变化",
                 L"IAT 已不是本会话所有，因此没有覆盖它；远程内存保留到游戏退出。",
                 PresentationTone::Warning, true, true};
+    case SessionResult::CancelledOwnershipUnreadable:
+        return {L"本次监测已停止", L"未确认 IAT 所有权；远程内存保留至游戏退出。",
+                PresentationTone::Warning, true, false};
+    case SessionResult::CancelledRestoreUnconfirmed:
+        return {L"本次监测已停止", L"撤销步骤未能完整确认 IAT 指针及页面保护；远程内存保留至游戏退出。",
+                PresentationTone::Warning, true, false};
     case SessionResult::ExistingGameNoWrite:
         return {L"文明 VI 已经运行",
                 L"为保护当前游戏，本工具没有附加或写入。退出游戏后再重新运行。",
@@ -344,6 +370,45 @@ SessionPresentation PresentSessionStatus(const SessionStatus& status) {
     }
     return {L"正在工作", L"请稍候。", PresentationTone::InProgress, false,
             false};
+}
+
+SessionPresentation PresentPlayerStatus(const SessionStatus& s) {
+    // Player-facing copy never appends raw platform detail; the report has typed evidence.
+    auto p=PresentSessionResult(s.result);
+    p.detail.clear();
+    if(s.result==SessionResult::None) {
+        p.tone=PresentationTone::InProgress;
+        switch(s.phase) {
+        case SessionPhase::Created: case SessionPhase::Preparing: p.headline=L"正在检测游戏";break;
+        case SessionPhase::Listening: case SessionPhase::WaitingForGame:
+            p.headline=L"正在等待文明 VI 启动";p.detail=L"请在 Steam 中启动游戏。";break;
+        case SessionPhase::ValidatingRuntime: p.headline=L"正在识别游戏版本";break;
+        case SessionPhase::InstallingGuard: p.headline=L"正在启用保护";break;
+        case SessionPhase::Monitoring: p.headline=L"正在确认 2K 状态";break;
+        case SessionPhase::Completed: p.headline=L"本次检测已结束";break;
+        }
+        return p;
+    }
+    switch(s.result) {
+    case SessionResult::Fixed: case SessionResult::OnlineWithoutIntervention:
+        p.headline=L"2K 已就绪";p.detail=L"可以关闭工具，继续游戏。";break;
+    case SessionResult::MonitorTimedOutHookKept:
+        p.headline=L"未能确认 2K 状态";p.detail=L"请查看游戏内的在线状态。如需反馈，请点“反馈问题”。";break;
+    case SessionResult::CancelledOwnershipUnreadable: case SessionResult::CancelledRestoreUnconfirmed:
+    case SessionResult::CancelledHookNotOwnedNoWrite:
+    case SessionResult::CancelledOwnedHookRestoredProtectionUncertainAllocationRetained:
+    case SessionResult::TargetWaitFailedHookKept:
+        p.headline=L"本次监测已停止";p.detail=L"要完全结束本次保护，请正常退出游戏。";break;
+    case SessionResult::ExistingGameNoWrite: p.detail=L"退出游戏后可重新检测。";break;
+    case SessionResult::CandidateDetectedReadOnly: p.headline=L"已识别候选游戏版本";p.detail=L"本次仅检测。";break;
+    case SessionResult::GuardInstallFailedNoHookProtectionUncertain:
+    case SessionResult::GuardInstallFailedRestoredAllocationRetained:
+    case SessionResult::GuardInstallFailedRestoredProtectionUncertainAllocationRetained:
+    case SessionResult::GuardInstallFailedStateUncertainAllocationRetained:
+        p.headline=L"保护未能正常启动";p.detail=L"请正常退出游戏后再试。";break;
+    default: if(p.tone==PresentationTone::Error) p.detail=L"可点“反馈问题”查看详细记录。";break;
+    }
+    return p;
 }
 
 SessionControls PresentSessionControls(const SessionStatus& status) {

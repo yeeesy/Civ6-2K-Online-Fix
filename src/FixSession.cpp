@@ -58,6 +58,12 @@ void FixSession::Publish(SessionPhase phase, SessionResult result,
     diagnostics_.elapsedMs = now - startedMs_;
     if (monitorStartedMs_) diagnostics_.monitorElapsedMs = now - *monitorStartedMs_;
     status.diagnostics = diagnostics_;
+    if (phase == SessionPhase::Completed) {
+        status.diagnostics.events = std::move(feedbackEvents_);
+        status.diagnostics.eventCount = status.diagnostics.events.size();
+        status.diagnostics.omittedEvents = 0;
+        status.diagnostics.omittedTail = omittedTail_;
+    }
     status.diagnostics.phaseMs[static_cast<std::size_t>(activePhase_)] += now - phaseStartedMs_;
     if (target != nullptr) {
         status.profile = target->profile;
@@ -76,13 +82,18 @@ SessionResult FixSession::Finish(SessionResult result,
                                  const TargetProcess* target,
                                  const MonitorSample* sample,
                                  std::wstring detail) {
+    if(target && diagnostics_.guardInstalled && result!=SessionResult::TargetExited)
+        diagnostics_.finalOwnership=platform_.InspectHook(*target,installedForReport_);
     Publish(SessionPhase::Completed, result, target, sample, std::move(detail));
     return result;
 }
 
 SessionResult FixSession::Run() {
+    const auto cancelledBeforeWrite = [this]() {return StopRequested() || preWriteStop_.load(std::memory_order_acquire);};
     startedMs_ = phaseStartedMs_ = platform_.MonotonicMilliseconds();
     diagnostics_ = {};
+    feedbackEvents_.clear();
+    omittedTail_ = 0;
     diagnostics_.available = true;
     diagnostics_.monitorTimeoutMs = options_.monitorTimeoutMs;
     diagnostics_.monitorPollMs = options_.monitorPollMs;
@@ -91,17 +102,20 @@ SessionResult FixSession::Run() {
     monitorStartedMs_.reset();
     Publish(SessionPhase::Preparing);
     const PreparationResult preparation = platform_.Prepare();
+    diagnostics_.gameFiles=preparation.gameFiles;
+    diagnostics_.scanError=preparation.scanError;
     if (preparation.outcome != PreparationOutcome::Ready) {
         return Finish(PreparationFailure(preparation.outcome), nullptr, nullptr,
                       preparation.detail);
     }
-    if (StopRequested()) {
+    if (cancelledBeforeWrite()) {
         return Finish(SessionResult::CancelledBeforeWrite);
     }
 
     // This transition is deliberately published before Steam can be invoked. UI guidance
     // is observational and can never gate target detection.
     Publish(SessionPhase::Listening);
+    if (cancelledBeforeWrite()) return Finish(SessionResult::CancelledBeforeWrite);
 
     bool initialSteamLaunchPending = options_.launchViaSteam;
     bool steamLaunchAttempted = false;
@@ -111,7 +125,7 @@ SessionResult FixSession::Run() {
             steamLaunchRequested_.exchange(false, std::memory_order_acq_rel);
         const bool requested = initialSteamLaunchPending || requestedByUser;
         initialSteamLaunchPending = false;
-        if (!requested || steamLaunchAttempted) {
+        if (!requested || steamLaunchAttempted || cancelledBeforeWrite()) {
             return true;
         }
         steamLaunchAttempted = true;
@@ -131,7 +145,7 @@ SessionResult FixSession::Run() {
     const std::uint64_t waitStarted = platform_.MonotonicMilliseconds();
     TargetProcess target;
     for (;;) {
-        if (StopRequested()) {
+        if (cancelledBeforeWrite()) {
             return Finish(SessionResult::CancelledBeforeWrite);
         }
         if (!launchSteamIfRequested()) {
@@ -182,12 +196,12 @@ SessionResult FixSession::Run() {
     if (buildUse != BuildUseDecision::InstallVerifiedGuard) {
         return Finish(SessionResult::UnsupportedBuildNoWrite, &target);
     }
-    if (StopRequested()) {
+    if (cancelledBeforeWrite()) {
         return Finish(SessionResult::CancelledBeforeWrite, &target);
     }
 
     Publish(SessionPhase::InstallingGuard, SessionResult::None, &target);
-    if (StopRequested()) {
+    if (cancelledBeforeWrite()) {
         return Finish(SessionResult::CancelledBeforeWrite, &target);
     }
     const GuardInstallResult installation =
@@ -219,6 +233,7 @@ SessionResult FixSession::Run() {
     }
 
     diagnostics_.guardInstalled = true;
+    installedForReport_=installation.guard;
     diagnostics_.processAgeAtGuardMs = platform_.ProcessAgeMilliseconds(target);
     const std::uint64_t monitorStarted = platform_.MonotonicMilliseconds();
     monitorStartedMs_ = monitorStarted;
@@ -243,6 +258,10 @@ SessionResult FixSession::Run() {
             const bool restored =
                 cleanup == HookCleanupOutcome::RestoreOwnedAndRetainAllocation ||
                 cleanup == HookCleanupOutcome::AlreadyOriginalAndRetainAllocation;
+            if (cleanup == HookCleanupOutcome::UnreadableNoWrite)
+                return Finish(SessionResult::CancelledOwnershipUnreadable, &target, &current);
+            if (cleanup == HookCleanupOutcome::RestoreAttemptUnconfirmed)
+                return Finish(SessionResult::CancelledRestoreUnconfirmed, &target, &current);
             return Finish(
                 restored
                     ? SessionResult::CancelledOwnedHookRestoredAllocationRetained
@@ -263,6 +282,11 @@ SessionResult FixSession::Run() {
         current = sample;
         const auto sampledAtMs = platform_.MonotonicMilliseconds() - monitorStarted;
         const bool changed = diagnostics_.Record(sample, sampledAtMs);
+        if (changed) {
+            // Above all possible polls in the normal 90 s / 10 ms session.
+            if (feedbackEvents_.size() < 16384) feedbackEvents_.push_back({sampledAtMs, sample});
+            else ++omittedTail_;
+        }
         const bool ready = CompleteSample(sample) && sample.discoveryState == 4 && sample.ssoState == 4;
         // Bound UI/log volume, but never suppress the first or ready observation.
         if (diagnostics_.samples == 1 || ready ||

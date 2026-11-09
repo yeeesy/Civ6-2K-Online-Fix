@@ -711,11 +711,13 @@ struct Win32FixPlatform::Impl {
                 pathError.clear();
                 const bool hasDx11 = std::filesystem::is_regular_file(
                     binaryRoot / kDx11Executable, pathError);
+                if(pathError == std::errc::no_such_file_or_directory) pathError.clear();
                 if (pathError) {
                     continue;
                 }
                 const bool hasDx12 = std::filesystem::is_regular_file(
                     binaryRoot / kDx12Executable, pathError);
+                if(pathError == std::errc::no_such_file_or_directory) pathError.clear();
                 if (pathError || (!hasDx11 && !hasDx12)) {
                     continue;
                 }
@@ -804,7 +806,7 @@ PreparationResult Win32FixPlatform::Prepare() {
                             "\"win32\":" +
                                 std::to_string(existing.win32Error));
         return {PreparationOutcome::ProcessScanFailed,
-                L"无法可靠检查文明 VI 是否已经运行。"};
+                L"无法可靠检查文明 VI 是否已经运行。",{},existing.win32Error};
     }
     if (existing.outcome == TargetScanOutcome::Found) {
         impl_->logger.Event("existing_game_detected_no_action",
@@ -822,6 +824,7 @@ PreparationResult Win32FixPlatform::Prepare() {
     bool foundExecutable = false;
     bool hashedExecutable = false;
     bool recognizedBuild = false;
+    std::vector<FileObservation> inspected;
     for (const wchar_t* executableName : {kDx11Executable, kDx12Executable}) {
         const std::filesystem::path path = binaryRoot / executableName;
         std::error_code pathError;
@@ -844,6 +847,12 @@ PreparationResult Win32FixPlatform::Prepare() {
             build.profile = FindBuildProfile(build.executableName, build.sha256);
             recognizedBuild = recognizedBuild || build.profile != nullptr;
         }
+        FileObservation observation;
+        observation.renderer=build.executableName==kDx11Executable?Renderer::DirectX11:Renderer::DirectX12;
+        observation.bytes=build.fingerprint.size;
+        observation.complete=build.fingerprint.valid && ParseFileDigest(build.sha256,observation.digest);
+        observation.recognized=build.profile!=nullptr;
+        inspected.push_back(observation);
         impl_->logger.Event(
             "installed_build_inspected",
             "\"executable\":\"" + JsonEscape(Utf8(build.executableName)) +
@@ -868,14 +877,14 @@ PreparationResult Win32FixPlatform::Prepare() {
     }
     if (!hashedExecutable) {
         return {PreparationOutcome::HashFailed,
-                L"无法读取游戏文件身份；本次不会启动或写入。"};
+                L"无法读取游戏文件身份；本次不会启动或写入。",std::move(inspected)};
     }
     if (!recognizedBuild) {
         return {PreparationOutcome::UnsupportedBuild,
-                L"当前游戏构建没有匹配的 Build Profile。"};
+                L"当前游戏构建没有匹配的 Build Profile。",std::move(inspected)};
     }
     return {PreparationOutcome::Ready,
-            L"已发现 Steam 安装并完成构建预检。"};
+            L"已发现 Steam 安装并完成构建预检。",std::move(inspected)};
     } catch (const std::exception& error) {
         impl_->logger.Event("preparation_exception_no_action",
                             "\"detail\":\"" +
@@ -928,7 +937,7 @@ RuntimeValidationResult Win32FixPlatform::ValidateRuntime(
         }
     }
     if (!impl_->process.Valid()) {
-        return {RuntimeValidationOutcome::ProcessExited, openError,
+        return {RuntimeValidationOutcome::ReadFailed, openError,
                 L"无法打开目标进程。"};
     }
     impl_->targetPid = target.pid;
@@ -1443,12 +1452,43 @@ MonitorSample Win32FixPlatform::ReadMonitorSample(
         impl_->moduleBase + impl_->activeProfile->ssoGlobalRva);
 }
 
+MonitorSample Win32FixPlatform::ObserveCandidate(const TargetProcess& target,
+                                                std::optional<std::int32_t>& lockCount) {
+    lockCount.reset();
+    const BuildProfile* p = impl_->activeProfile;
+    if (!p || p != target.profile || p->supportState != SupportState::ReadOnlyCandidate ||
+        QueryTargetState(target) != TargetRunState::Running) return {};
+    const auto reader = [&](std::uintptr_t address, auto& value) {
+        return ReadRemoteError(impl_->process.Get(), address, value);
+    };
+    const auto v = ReadLockVector(reader, impl_->moduleBase + p->opensslLockVectorRva, p->opensslLockIndex);
+    std::uintptr_t lock = 0;
+    std::int32_t count = 0;
+    if (v.state == VectorProbeState::Available &&
+        reader(v.begin + p->opensslLockIndex * sizeof(lock), lock) == 0 &&
+        lock && IsAddressAdditionSafe(lock, p->mutexCountOffset) &&
+        reader(lock + p->mutexCountOffset, count) == 0) lockCount = count;
+    return SampleCandidateServices(reader, impl_->moduleBase + p->discoveryGlobalRva,
+                                   impl_->moduleBase + p->ssoGlobalRva);
+}
+
 std::optional<std::uint64_t> Win32FixPlatform::ProcessAgeMilliseconds(const TargetProcess& target) {
     FILETIME now{};
     GetSystemTimeAsFileTime(&now);
     const auto ticks = (static_cast<std::uint64_t>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
     if (target.creationTime == 0 || ticks < target.creationTime) return std::nullopt;
     return (ticks - target.creationTime) / 10000;
+}
+
+IatOwnership Win32FixPlatform::InspectHook(const TargetProcess& target,const InstalledGuard& guard) {
+    if (QueryTargetState(target)!=TargetRunState::Running || !guard.iatAddress ||
+        guard.iatAddress!=impl_->validatedIat || !guard.guardAddress ||
+        guard.originalTarget!=impl_->validatedOriginal) return IatOwnership::Unreadable;
+    std::uintptr_t observed{};
+    if (!ReadRemote(impl_->process.Get(),guard.iatAddress,observed)) return IatOwnership::Unreadable;
+    if (observed==guard.guardAddress) return IatOwnership::OwnedBySession;
+    if (observed==guard.originalTarget) return IatOwnership::OriginalTarget;
+    return IatOwnership::ForeignOwner;
 }
 
 HookCleanupOutcome Win32FixPlatform::RestoreOwnedHook(
@@ -1483,10 +1523,18 @@ HookCleanupOutcome Win32FixPlatform::RestoreOwnedHook(
             outcome = HookCleanupOutcome::RestoreOwnedAndRetainAllocation;
         } else if (restore.evidence.readBackCompleted &&
                    restore.observed == guard.originalTarget) {
-            outcome = HookCleanupOutcome::
-                RestorePointerVerifiedProtectionUncertainRetainAllocation;
+            outcome = restore.evidence.protectionRestored
+                          ? HookCleanupOutcome::AlreadyOriginalAndRetainAllocation
+                          : HookCleanupOutcome::RestorePointerVerifiedProtectionUncertainRetainAllocation;
+        } else if (restore.evidence.madeWritable && !restore.evidence.ownershipMatched &&
+                   restore.evidence.protectionRestored && restore.evidence.readBackCompleted &&
+                   restore.observed != guard.guardAddress) {
+            outcome = HookCleanupOutcome::ForeignOwnerNoWrite;
         } else {
-            outcome = HookCleanupOutcome::UnreadableNoWrite;
+            outcome = restore.evidence.madeWritable &&
+                      (restore.evidence.ownershipMatched || !restore.evidence.protectionRestored)
+                          ? HookCleanupOutcome::RestoreAttemptUnconfirmed
+                          : HookCleanupOutcome::UnreadableNoWrite;
         }
         impl_->logger.Event(
             "owned_hook_restore",

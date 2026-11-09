@@ -71,6 +71,10 @@ $sourceRootFiles = @(
     'verify_hashes.ps1'
     'build.ps1'
     'package.ps1'
+    'sign_update.ps1'
+    'analyze_build.py'
+    'package_sources.txt'
+    'logs_README.txt'
     'version.json'
     '.gitignore'
     '.editorconfig'
@@ -125,6 +129,15 @@ $forbiddenSourceFile = $sourceTreeFiles | Where-Object {
 if ($null -ne $forbiddenSourceFile) {
     throw "Release source tree contains a forbidden generated or sensitive file: $($forbiddenSourceFile.FullName)"
 }
+$declaredFiles=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach($line in Get-Content -LiteralPath (Join-Path $projectRoot 'package_sources.txt')){
+    $file=$line.Trim()
+    if(!$file -or $file.StartsWith('#')){continue}
+    if($file -notmatch '^(src|tests|docs|\.github)/' -or $file -match '[\\:*?"<>|]|(^|/)\.{1,2}(/|$)' -or
+       !$declaredFiles.Add($file)){throw 'Invalid source file inventory.'}
+}
+$actualNames=[string[]]@($sourceTreeFiles | ForEach-Object {[IO.Path]::GetRelativePath($projectRoot,$_.FullName).Replace('\','/')})
+if(!$declaredFiles.SetEquals($actualNames)){throw 'Source tree and release file inventory differ.'}
 
 $buildManifest = Get-Content -LiteralPath $manifestSource -Raw | ConvertFrom-Json
 # 清单必须与每个构建的指定权限精确匹配，包括只读候选。
@@ -186,6 +199,13 @@ $builtHash = (Get-FileHash -LiteralPath $appSource -Algorithm SHA256).Hash
 if ($builtHash -ne $buildManifest.SHA256) {
     throw 'Executable hash does not match build_manifest.json.'
 }
+$compiledProfiles = @(& $appSource --print-profiles | Out-String)
+if ($LASTEXITCODE -ne 0 -or $compiledProfiles.Count -eq 0) {throw 'Cannot read compiled profile registry.'}
+$actualProfiles = @(($compiledProfiles -join '') | ConvertFrom-Json)
+if ((ConvertTo-Json -InputObject $actualProfiles -Compress -Depth 5) -cne
+    (ConvertTo-Json -InputObject $manifestProfiles -Compress -Depth 5)) {
+    throw 'Compiled profile registry and distribution manifest differ.'
+}
 
 New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
 $sourceTarget = Join-Path $packageRoot 'source'
@@ -197,14 +217,21 @@ Copy-Item -LiteralPath $manifestSource -Destination (Join-Path $packageRoot 'bui
 foreach ($name in $packageDocuments) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination $packageRoot
 }
-Copy-Item -LiteralPath (Join-Path $projectRoot 'docs') -Destination $packageRoot -Recurse
 Copy-Item -LiteralPath (Join-Path $projectRoot 'logs_README.txt') -Destination (Join-Path $logsTarget 'README.txt')
 
 foreach ($name in $sourceRootFiles) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination $sourceTarget
 }
-foreach ($name in @('src', 'tests', 'docs', '.github')) {
-    Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination $sourceTarget -Recurse
+foreach ($relative in $declaredFiles) {
+    $src=Join-Path $projectRoot $relative
+    $dest=Join-Path $sourceTarget $relative
+    [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($dest)) | Out-Null
+    Copy-Item -LiteralPath $src -Destination $dest
+    if($relative.StartsWith('docs/',[StringComparison]::Ordinal)){
+        $doc=Join-Path $packageRoot $relative
+        [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($doc)) | Out-Null
+        Copy-Item -LiteralPath $src -Destination $doc
+    }
 }
 
 $hashLines = @()

@@ -52,6 +52,7 @@ inline const wchar_t* ClipboardFeedback(bool copied) noexcept {
     return copied ? L"已复制" : L"复制失败";
 }
 SessionPresentation PresentSessionStatus(const SessionStatus& status);
+SessionPresentation PresentPlayerStatus(const SessionStatus& status);
 SessionControls PresentSessionControls(const SessionStatus& status);
 SessionLaunchControl PresentSessionLaunchControl(
     const SessionStatus& status, bool steamLaunchRequested);
