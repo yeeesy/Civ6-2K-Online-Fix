@@ -127,27 +127,31 @@ if ($null -ne $forbiddenSourceFile) {
 }
 
 $buildManifest = Get-Content -LiteralPath $manifestSource -Raw | ConvertFrom-Json
-# 发布策略：清单必须恰好包含下面这些已审计的 Verified Profile，多一条、少一条都不行。
+# 清单必须与每个构建的指定权限精确匹配，包括只读候选。
 # 新增游戏构建时，先按 docs/MAINTAINER.md 完成验证，再加入本表和 build.ps1 的清单。
 $auditedProfiles = @(
     [pscustomobject]@{
         Id = 'civ6-win64steam-1.0.12.68-dx11'
         Renderer = 'DX11'
+        SupportState = 'Verified'
         SHA256 = 'E7450823CC8E00468CFF7B9D7B97C63140EAE38AE1D774BA4EFA437556C42D63'
     }
     [pscustomobject]@{
         Id = 'civ6-win64steam-1.0.12.68-dx12'
         Renderer = 'DX12'
+        SupportState = 'Verified'
         SHA256 = 'C2C3D40B86260A541D8A4D38CB70D50D3406AE1DE374AFC382D1E42BC1342F1E'
     }
     [pscustomobject]@{
         Id = 'civ6-win64steam-1.0.12.72-dx11'
         Renderer = 'DX11'
+        SupportState = 'ReadOnlyCandidate'
         SHA256 = 'D1A0CFD439E7451BE515F47595CFA0B6B983F56D1FAF4EA434A4CE3B21491EBE'
     }
     [pscustomobject]@{
         Id = 'civ6-win64steam-1.0.12.72-dx12'
         Renderer = 'DX12'
+        SupportState = 'ReadOnlyCandidate'
         SHA256 = '1ADB1A2BCA31F9DB6BE14D6E22D30D2DFCB6DCD8DE3ABD9A81E7BEA396B39417'
     }
 )
@@ -158,7 +162,7 @@ if ($profilesMatched) {
         $match = @($manifestProfiles | Where-Object { $_.Id -eq $audited.Id })
         if ($match.Count -ne 1 -or
             $match[0].Renderer -ne $audited.Renderer -or
-            $match[0].SupportState -ne 'Verified' -or
+            $match[0].SupportState -ne $audited.SupportState -or
             $match[0].SHA256 -ne $audited.SHA256) {
             $profilesMatched = $false
             break
@@ -176,7 +180,7 @@ if ($buildManifest.Version -ne $productVersion -or
     $buildManifest.TestCount -lt 1 -or
     -not $buildManifest.NativeAnalysis -or
     -not $buildManifest.ReproducibleBuild) {
-    throw "Release packaging requires the exact audited Verified DX11/DX12 profile set, version $productVersion from version.json, executed tests, NativeAnalysis=true, and ReproducibleBuild=true."
+    throw "Release packaging requires the exact DX11/DX12 profile identities and support states, version $productVersion from version.json, executed tests, NativeAnalysis=true, and ReproducibleBuild=true."
 }
 $builtHash = (Get-FileHash -LiteralPath $appSource -Algorithm SHA256).Hash
 if ($builtHash -ne $buildManifest.SHA256) {

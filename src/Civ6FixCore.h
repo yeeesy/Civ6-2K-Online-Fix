@@ -114,6 +114,8 @@ inline constexpr BuildProfile kDx12Profile{
 };
 
 // --- 1.0.12.72 (2026-11-02 构建) ------------------------------------------
+// PR #2 贡献者报告的定位依据；尚未由维护者在新版上独立验证。
+// 对全局量的 dword 引用不能证明它是 SampleMonitor 需要的 64 位服务对象指针。
 // 数值来源：
 //   mtxUnlockIatRva          —— 由 PE 导入表 MSVCP140.dll!_Mtx_unlock 槽位确定性算出，
 //                               并在游戏进程内核对过实际目标。
@@ -133,7 +135,7 @@ inline constexpr BuildProfile kDx11Profile_1_0_12_72{
     L"CivilizationVI.exe",
     L"D1A0CFD439E7451BE515F47595CFA0B6B983F56D1FAF4EA434A4CE3B21491EBE",
     Renderer::DirectX11,
-    SupportState::Verified,
+    SupportState::ReadOnlyCandidate,
     21189480,
     0x6AE8EA29,
     0x140000000,
@@ -157,7 +159,7 @@ inline constexpr BuildProfile kDx12Profile_1_0_12_72{
     L"CivilizationVI_DX12.exe",
     L"1ADB1A2BCA31F9DB6BE14D6E22D30D2DFCB6DCD8DE3ABD9A81E7BEA396B39417",
     Renderer::DirectX12,
-    SupportState::Verified,
+    SupportState::ReadOnlyCandidate,
     21420896,
     0x6AE8DE31,
     0x140000000,
