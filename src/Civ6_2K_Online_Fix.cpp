@@ -220,7 +220,7 @@ int RunDiagnosis(civ6fix::Logger& logger) {
     civ6fix::Win32FixPlatform platform(logger);
     const civ6fix::PreparationResult result = platform.Prepare();
     const bool ready = result.outcome == civ6fix::PreparationOutcome::Ready;
-    ConsoleLine(ready ? L"只读诊断通过：至少一个已知 Build Profile 可用。"
+    ConsoleLine(ready ? L"只读诊断通过：至少一种构建已登记或通过结构兼容检查；实际修复仍需运行时校验。"
                       : L"只读诊断未通过：" + result.detail);
     logger.Event("read_only_diagnosis_completed",
                  "\"ready\":" +

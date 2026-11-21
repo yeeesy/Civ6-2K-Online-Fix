@@ -45,6 +45,7 @@ enum class SupportState {
     Experimental,
     ReadOnlyCandidate,
     Unsupported,
+    CompatibleProbe,
 };
 
 struct BuildProfile {
@@ -216,6 +217,7 @@ enum class BuildUseDecision {
     InstallVerifiedGuard,
     ObserveCandidateReadOnly,
     RejectUnknownNoWrite,
+    InstallCompatibleGuard,
 };
 
 constexpr BuildUseDecision DecideBuildUse(
@@ -225,6 +227,9 @@ constexpr BuildUseDecision DecideBuildUse(
     }
     if (profile->supportState == SupportState::Verified) {
         return BuildUseDecision::InstallVerifiedGuard;
+    }
+    if (profile->supportState == SupportState::CompatibleProbe) {
+        return BuildUseDecision::InstallCompatibleGuard;
     }
     return BuildUseDecision::ObserveCandidateReadOnly;
 }

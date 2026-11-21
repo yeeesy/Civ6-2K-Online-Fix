@@ -9,6 +9,7 @@
 
 #include "Logger.h"
 #include "SteamDiscovery.h"
+#include "CompatibilityProbe.h"
 
 #include <algorithm>
 #include <chrono>
@@ -40,12 +41,14 @@ const char* SupportStateLogName(SupportState state) noexcept {
     case SupportState::Experimental: return "experimental";
     case SupportState::ReadOnlyCandidate: return "read_only_candidate";
     case SupportState::Unsupported: return "unsupported";
+    case SupportState::CompatibleProbe: return "compatible_probe";
     }
     return "unsupported";
 }
 
 bool BuildUseAllowsGuard(BuildUseDecision decision) noexcept {
-    return decision == BuildUseDecision::InstallVerifiedGuard;
+    return decision == BuildUseDecision::InstallVerifiedGuard ||
+           decision == BuildUseDecision::InstallCompatibleGuard;
 }
 
 class ScopedHandle {
@@ -447,6 +450,20 @@ bool UnlockCallMatches(HANDLE process,std::uintptr_t base,const BuildProfile& pr
            MatchesIndirectUnlockCall(bytes,ret,profile.mtxUnlockIatRva);
 }
 
+bool CompatibleCodeMatches(HANDLE process, std::uintptr_t base, std::uintptr_t runtime,
+                           const CompatibilityLayout& layout) {
+    for (const auto& proof : layout.code) {
+        std::vector<std::uint8_t> bytes(proof.bytes.size());
+        SIZE_T received = 0;
+        if (!IsCommittedImageSpan(process, base + proof.rva, bytes.size(), base, true) ||
+            !ReadProcessMemory(process, reinterpret_cast<LPCVOID>(base + proof.rva),
+                               bytes.data(), bytes.size(), &received) ||
+            received != bytes.size() || bytes != proof.bytes) return false;
+    }
+    std::array<std::uint8_t, 34> code{};
+    return ReadRemote(process, runtime, code) && MatchesMutexRuntime(code);
+}
+
 bool IsExpectedSystemRuntimePath(const std::filesystem::path& path,
                                  std::wstring_view moduleName) {
     std::vector<wchar_t> systemDirectory(32768);
@@ -625,12 +642,18 @@ std::string PatchOutcomeName(PointerPatchOutcome outcome) {
 
 struct Win32FixPlatform::Impl {
     struct CachedBuild {
+        struct Adapted {
+            std::wstring digest;
+            BuildProfile profile{};
+            CompatibilityLayout layout;
+        };
         std::filesystem::path path;
         std::wstring executableName;
         std::wstring sha256;
         const BuildProfile* profile = nullptr;
         FileFingerprint fingerprint;
         ScopedHandle pinnedFile;
+        std::shared_ptr<Adapted> adapted;
     };
 
     explicit Impl(Logger& value) : logger(value) {}
@@ -768,7 +791,10 @@ struct Win32FixPlatform::Impl {
                 return {TargetScanOutcome::Found,
                         {entry.th32ProcessID,
                          build != nullptr ? build->profile : nullptr,
-                         imagePath.wstring(), creationTime},
+                         imagePath.wstring(), creationTime,
+                         build != nullptr && build->adapted
+                             ? std::shared_ptr<const BuildProfile>(build->adapted, &build->adapted->profile)
+                             : std::shared_ptr<const BuildProfile>{}},
                         ERROR_SUCCESS};
             }
             return {TargetScanOutcome::Found,
@@ -845,6 +871,39 @@ PreparationResult Win32FixPlatform::Prepare() {
         if (!build.sha256.empty() && build.fingerprint.valid) {
             hashedExecutable = true;
             build.profile = FindBuildProfile(build.executableName, build.sha256);
+            if (!build.profile && build.fingerprint.size <= 128U * 1024U * 1024U) {
+                LARGE_INTEGER zero{};
+                std::vector<std::uint8_t> file(static_cast<std::size_t>(build.fingerprint.size));
+                DWORD received = 0;
+                if (!file.empty() && SetFilePointerEx(build.pinnedFile.Get(), zero, nullptr, FILE_BEGIN) &&
+                    ReadFile(build.pinnedFile.Get(), file.data(), static_cast<DWORD>(file.size()), &received, nullptr) &&
+                    received == file.size()) {
+                    auto layout = ProbeCompatibility(file);
+                    if (layout) {
+                        build.adapted = std::make_shared<Impl::CachedBuild::Adapted>();
+                        auto& adapted = *build.adapted;
+                        adapted.digest = build.sha256;
+                        adapted.layout = std::move(*layout);
+                        const bool dx11 = build.executableName == kDx11Executable;
+                        adapted.profile = dx11 ? kDx11Profile_1_0_12_72 : kDx12Profile_1_0_12_72;
+                        auto& p = adapted.profile;
+                        p.id = dx11 ? L"civ6-win64steam-compatible-dx11" : L"civ6-win64steam-compatible-dx12";
+                        p.sha256 = adapted.digest.c_str();
+                        p.supportState = SupportState::CompatibleProbe;
+                        p.fileSize = build.fingerprint.size;
+                        p.peTimestamp = adapted.layout.timestamp;
+                        p.preferredImageBase = adapted.layout.imageBase;
+                        p.imageSize = adapted.layout.imageSize;
+                        p.dllCharacteristics = adapted.layout.dllCharacteristics;
+                        p.mtxUnlockIatRva = adapted.layout.unlockIat;
+                        p.opensslUnlockReturnRva = adapted.layout.unlockReturn;
+                        p.opensslLockVectorRva = adapted.layout.lockVector;
+                        p.discoveryGlobalRva = adapted.layout.discovery;
+                        p.ssoGlobalRva = adapted.layout.sso;
+                        build.profile = &p;
+                    }
+                }
+            }
             recognizedBuild = recognizedBuild || build.profile != nullptr;
         }
         FileObservation observation;
@@ -881,7 +940,7 @@ PreparationResult Win32FixPlatform::Prepare() {
     }
     if (!recognizedBuild) {
         return {PreparationOutcome::UnsupportedBuild,
-                L"当前游戏构建没有匹配的 Build Profile。",std::move(inspected)};
+                L"已检查现有修复方法，但未能唯一确认兼容的锁调用和服务布局。",std::move(inspected)};
     }
     return {PreparationOutcome::Ready,
             L"已发现 Steam 安装并完成构建预检。",std::move(inspected)};
@@ -1200,6 +1259,13 @@ RuntimeValidationResult Win32FixPlatform::ValidateRuntime(
 
     const std::uintptr_t vectorAddress =
         mainModule->base + profile.opensslLockVectorRva;
+    if (cached->adapted) {
+        if (!CompatibleCodeMatches(impl_->process.Get(), mainModule->base, originalTarget, cached->adapted->layout)) {
+            impl_->process.Reset();
+            return {RuntimeValidationOutcome::MutexLayoutMismatch, ERROR_INVALID_DATA,
+                    L"系统运行库的锁计数及所有者布局不符合现有修复方法。"};
+        }
+    }
     const auto vector = ReadLockVector(
         [&](std::uintptr_t address, auto& value) {
             return ReadRemoteError(impl_->process.Get(), address, value);
@@ -1290,7 +1356,11 @@ GuardInstallResult Win32FixPlatform::InstallGuard(
     }
 
     std::uintptr_t currentIat = 0;
+    const auto* cached = impl_->FindBuild(target.imagePath);
     if (!UnlockCallMatches(impl_->process.Get(),impl_->moduleBase,profile) ||
+        !cached || cached->profile != &profile ||
+        (cached->adapted && !CompatibleCodeMatches(impl_->process.Get(), impl_->moduleBase,
+                                                  impl_->validatedOriginal, cached->adapted->layout)) ||
         !ReadRemote(impl_->process.Get(), impl_->validatedIat, currentIat) ||
         currentIat != impl_->validatedOriginal) {
         return {GuardInstallOutcome::FailedNoHook, {}, ERROR_INVALID_STATE,
