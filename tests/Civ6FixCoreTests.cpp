@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iterator>
 #include "SteamDiscovery.h"
+#include "CompatibilityProbeTests.h"
 
 #include <cstdint>
 #include <cstring>
@@ -79,7 +80,7 @@ public:
 
     civ6fix::TargetScanResult ScanForTarget() override {
         return {civ6fix::TargetScanOutcome::Found,
-                {42, targetProfile, L"scripted-target"}, 0};
+                {42, targetProfile, L"scripted-target", 0, profileOwner}, 0};
     }
 
     civ6fix::RuntimeValidationResult ValidateRuntime(
@@ -126,6 +127,7 @@ public:
     void SleepFor(std::uint32_t) override {}
 
     const civ6fix::BuildProfile* targetProfile = &civ6fix::kDx12Profile;
+    std::shared_ptr<const civ6fix::BuildProfile> profileOwner;
     civ6fix::RuntimeValidationOutcome validationOutcome =
         civ6fix::RuntimeValidationOutcome::Valid;
     civ6fix::GuardInstallOutcome installOutcome =
@@ -443,7 +445,7 @@ void TestDetailedDiagnostics(TestRunner& tests) {
     status.pid = 987654321;
     status.detail = L"S:\\PrivateOwner\\raw.jsonl 0xDEADBEEF token=SECRET_ACCOUNT";
     bool privacySafe = true;
-    for (int result = 0; result <= static_cast<int>(SessionResult::TargetWaitFailedHookKept); ++result) {
+    for (int result = 0; result <= static_cast<int>(SessionResult::UnsupportedAfterProbeCleanupUncertain); ++result) {
         status.result = static_cast<SessionResult>(result);
         const auto shared = BuildShareableDiagnostic(L"fixture", status, true);
         for (const auto* secret : {L"PrivateOwner", L"raw.jsonl", L"0xDEADBEEF", L"SECRET_ACCOUNT", L"SECRET_HASH", L"987654321"})
@@ -709,8 +711,82 @@ void TestDiscoveryAndPresentation(TestRunner& tests) {
 
 }
 
+void TestAutomaticCompatibility(TestRunner& tests) {
+    compatibility_test::Run(tests);
+    {
+        std::vector<std::string> order;
+        ListenerOrderPlatform platform(order);
+        CapturingObserver observer;
+        auto owned = std::make_shared<civ6fix::BuildProfile>(civ6fix::kDx12Profile);
+        owned->supportState = civ6fix::SupportState::CompatibleProbe;
+        platform.profileOwner = owned;
+        platform.targetProfile = owned.get();
+        platform.installOutcome = civ6fix::GuardInstallOutcome::Installed;
+        platform.targetRunState = civ6fix::TargetRunState::Running;
+        platform.monitorSample = {true, 0, 2, 2};
+        platform.cleanupOutcome = civ6fix::HookCleanupOutcome::RestoreOwnedAndRetainAllocation;
+        civ6fix::SessionOptions options; options.monitorTimeoutMs = 1;
+        civ6fix::FixSession session(platform, observer, options);
+        tests.Expect(session.Run() == civ6fix::SessionResult::UnsupportedAfterProbeRestored &&
+                     platform.installCalls == 1 && platform.restoreCalls == 1,
+                     "ineffective compatible repair is reported unsupported only after an owned restoration");
+        tests.Expect(observer.last.profileOwner == owned,
+                     "completed UI status owns its generated compatibility profile after worker teardown");
+    }
+    for (const auto cleanup : {civ6fix::HookCleanupOutcome::ForeignOwnerNoWrite,
+                              civ6fix::HookCleanupOutcome::UnreadableNoWrite,
+                              civ6fix::HookCleanupOutcome::RestoreAttemptUnconfirmed,
+                              civ6fix::HookCleanupOutcome::RestorePointerVerifiedProtectionUncertainRetainAllocation}) {
+        std::vector<std::string> order;
+        ListenerOrderPlatform platform(order); SilentObserver observer;
+        auto compatible = civ6fix::kDx12Profile;
+        compatible.supportState = civ6fix::SupportState::CompatibleProbe;
+        platform.targetProfile = &compatible;
+        platform.installOutcome = civ6fix::GuardInstallOutcome::Installed;
+        platform.targetRunState = civ6fix::TargetRunState::Running;
+        platform.monitorSample = {true, 0, 2, 2}; platform.cleanupOutcome = cleanup;
+        civ6fix::SessionOptions options; options.monitorTimeoutMs = 1;
+        civ6fix::FixSession session(platform, observer, options);
+        tests.Expect(session.Run() == civ6fix::SessionResult::UnsupportedAfterProbeCleanupUncertain,
+                     "unsupported probe preserves uncertain or foreign ownership cleanup outcomes");
+    }
+    for (const int scenario : {0,1,2}) {
+        std::vector<std::string> order;
+        ListenerOrderPlatform platform(order); SilentObserver observer;
+        auto compatible = civ6fix::kDx12Profile;
+        compatible.supportState = civ6fix::SupportState::CompatibleProbe;
+        platform.targetProfile = &compatible;
+        platform.installOutcome = civ6fix::GuardInstallOutcome::Installed;
+        platform.targetRunState = civ6fix::TargetRunState::Running;
+        platform.monitorSample = scenario==0 ? civ6fix::MonitorSample{true,0,4,4}
+                                            : civ6fix::MonitorSample{true,1,2,2};
+        if (scenario==2) platform.monitorSample.counter={civ6fix::ReadQuality::ValueReadFailed,299};
+        civ6fix::SessionOptions options; options.monitorTimeoutMs=1;
+        civ6fix::FixSession session(platform,observer,options);
+        const auto expected = scenario==0 ? civ6fix::SessionResult::OnlineWithoutIntervention
+                                        : civ6fix::SessionResult::MonitorTimedOutHookKept;
+        tests.Expect(session.Run()==expected && platform.restoreCalls==0,
+                     "compatible probe distinguishes natural online, intercepted timeout, and unreadable evidence");
+    }
+    {
+        std::vector<std::string> order;
+        ListenerOrderPlatform platform(order);
+        SilentObserver observer;
+        auto compatible = civ6fix::kDx12Profile;
+        compatible.supportState = civ6fix::SupportState::CompatibleProbe;
+        platform.targetProfile = &compatible;
+        platform.installOutcome = civ6fix::GuardInstallOutcome::Installed;
+        platform.targetRunState = civ6fix::TargetRunState::Running;
+        platform.monitorSample = {true, 1, 4, 4};
+        civ6fix::FixSession session(platform, observer);
+        tests.Expect(session.Run() == civ6fix::SessionResult::Fixed && platform.installCalls == 1,
+                     "compatible updated EXE tries the existing repair before rejecting its build");
+    }
+}
+
 int main() {
     TestRunner tests;
+    TestAutomaticCompatibility(tests);
     TestFailureBoundaries(tests);
     TestDetailedDiagnostics(tests);
     TestSessionReview(tests);

@@ -8,6 +8,7 @@ docs/DIAGNOSTICS.md
 docs/MAINTAINER.md
 docs/RELEASE_NOTES_1.1.0.md
 docs/RELEASE_NOTES_1.2.md
+docs/RELEASE_NOTES_1.2.1.md
 docs/REVIEW_2026-09-27.md
 src/AppWindow.cpp
 src/AppWindow.h
@@ -19,6 +20,9 @@ src/DiagnosticData.h
 src/FeedbackFile.cpp
 src/FeedbackFile.h
 src/FixSession.cpp
+src/CompatibilityProbe.cpp
+src/CompatibilityProbe.h
+tests/CompatibilityProbeTests.h
 src/FixSession.h
 src/Logger.cpp
 src/Logger.h

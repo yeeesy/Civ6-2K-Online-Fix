@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace civ6fix {
@@ -47,6 +48,8 @@ enum class SessionResult {
     GuardInstallFailedRestoredProtectionUncertainAllocationRetained,
     GuardInstallFailedStateUncertainAllocationRetained,
     TargetWaitFailedHookKept,
+    UnsupportedAfterProbeRestored,
+    UnsupportedAfterProbeCleanupUncertain,
 };
 
 constexpr int ExitCodeForSessionResult(SessionResult result) noexcept {
@@ -84,6 +87,7 @@ struct SessionStatus {
     int ssoState = -1;
     std::wstring detail;
     SessionDiagnostics diagnostics;
+    std::shared_ptr<const BuildProfile> profileOwner;
 };
 
 class ISessionObserver {
@@ -113,6 +117,7 @@ struct TargetProcess {
     const BuildProfile* profile = nullptr;
     std::wstring imagePath;
     std::uint64_t creationTime = 0;
+    std::shared_ptr<const BuildProfile> profileOwner;
 };
 
 enum class TargetScanOutcome {

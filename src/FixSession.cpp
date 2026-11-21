@@ -67,6 +67,7 @@ void FixSession::Publish(SessionPhase phase, SessionResult result,
     status.diagnostics.phaseMs[static_cast<std::size_t>(activePhase_)] += now - phaseStartedMs_;
     if (target != nullptr) {
         status.profile = target->profile;
+        status.profileOwner = target->profileOwner;
         status.pid = target->pid;
     }
     if (sample != nullptr) {
@@ -193,7 +194,8 @@ SessionResult FixSession::Run() {
     if (buildUse == BuildUseDecision::ObserveCandidateReadOnly) {
         return Finish(SessionResult::CandidateDetectedReadOnly, &target);
     }
-    if (buildUse != BuildUseDecision::InstallVerifiedGuard) {
+    if (buildUse != BuildUseDecision::InstallVerifiedGuard &&
+        buildUse != BuildUseDecision::InstallCompatibleGuard) {
         return Finish(SessionResult::UnsupportedBuildNoWrite, &target);
     }
     if (cancelledBeforeWrite()) {
@@ -318,6 +320,17 @@ SessionResult FixSession::Run() {
                           &current);
         }
         if (decision == MonitorDecision::DetachTimedOutAndKeepHook) {
+            if (buildUse == BuildUseDecision::InstallCompatibleGuard &&
+                CompleteSample(current) && diagnostics_.lastGoodCounter == 0) {
+                const auto cleanup = platform_.RestoreOwnedHook(target, installation.guard);
+                diagnostics_.compatibilityCleanup = cleanup;
+                if (cleanup == HookCleanupOutcome::TargetExited)
+                    return Finish(SessionResult::TargetExited, &target, &current);
+                const bool restored = cleanup == HookCleanupOutcome::RestoreOwnedAndRetainAllocation ||
+                                      cleanup == HookCleanupOutcome::AlreadyOriginalAndRetainAllocation;
+                return Finish(restored ? SessionResult::UnsupportedAfterProbeRestored
+                                       : SessionResult::UnsupportedAfterProbeCleanupUncertain, &target, &current);
+            }
             return Finish(SessionResult::MonitorTimedOutHookKept, &target, &current);
         }
         platform_.SleepFor(options_.monitorPollMs);

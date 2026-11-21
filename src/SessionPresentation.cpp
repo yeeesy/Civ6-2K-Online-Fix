@@ -15,6 +15,7 @@ const wchar_t* SupportStateName(SupportState state) noexcept {
     case SupportState::Experimental: return L"Experimental";
     case SupportState::ReadOnlyCandidate: return L"ReadOnlyCandidate";
     case SupportState::Unsupported: return L"Unsupported";
+    case SupportState::CompatibleProbe: return L"CompatibleProbe";
     }
     return L"Unsupported";
 }
@@ -53,6 +54,7 @@ const wchar_t* ResultCode(SessionResult result) noexcept {
     RESULT_CODE(GuardInstallFailedRestoredProtectionUncertainAllocationRetained);
     RESULT_CODE(GuardInstallFailedStateUncertainAllocationRetained);
     RESULT_CODE(TargetWaitFailedHookKept);
+    RESULT_CODE(UnsupportedAfterProbeRestored); RESULT_CODE(UnsupportedAfterProbeCleanupUncertain);
     }
 #undef RESULT_CODE
     return L"Unknown";
@@ -165,6 +167,9 @@ void WriteEvidence(std::wostringstream& text, const SessionStatus& status) {
          << L"；Win32=" << d.validationError
          << L"\r\nGuard 安装：" << (d.installAttempted ? InstallName(d.installOutcome) : L"未执行")
          << L"；Win32=" << d.installError << L"\r\n";
+    if (d.compatibilityCleanup) {
+        text << L"自动适配撤销结果（类型码）：" << static_cast<int>(*d.compatibilityCleanup) << L"\r\n";
+    }
     if (d.guardInstalled) {
         text << L"结束时保护位置：";
         if (!d.finalOwnership) text << L"未采集";
@@ -281,8 +286,16 @@ SessionPresentation PresentSessionResult(SessionResult result) {
                 PresentationTone::Error, true, true};
     case SessionResult::UnsupportedBuildNoWrite:
         return {L"当前构建不受支持",
-                L"游戏哈希没有匹配的 Build Profile；工具按安全策略拒绝猜测偏移，未写入进程。",
+                L"已检查现有修复方法，但无法唯一确认兼容的锁调用和服务布局；未写入进程。",
                 PresentationTone::Error, true, false};
+    case SessionResult::UnsupportedAfterProbeRestored:
+        return {L"当前构建暂不支持自动修复",
+                L"已尝试现有修复方法，但未观察到异常解锁拦截，也未确认 2K 就绪。本次保护入口已恢复；保护内存随游戏退出回收。请点“反馈问题”保存报告。",
+                PresentationTone::Warning, true, false};
+    case SessionResult::UnsupportedAfterProbeCleanupUncertain:
+        return {L"当前构建暂不支持自动修复",
+                L"已尝试现有方法，但未确认修复有效，且无法完整确认撤销结果。请正常退出游戏后再试，并点“反馈问题”保存报告。",
+                PresentationTone::Warning, true, false};
     case SessionResult::HashFailedNoWrite:
         return {L"无法校验游戏文件",
                 L"未能建立可靠的 SHA-256 与文件身份，因此没有启动或写入。",
@@ -343,7 +356,7 @@ SessionPresentation PresentSessionStatus(const SessionStatus& status) {
                 PresentationTone::Neutral, false, false};
     case SessionPhase::Preparing:
         return {L"正在发现并校验游戏",
-                L"读取 Steam 安装清单、检查已有进程并匹配 DX11/DX12 Build Profile。",
+                L"读取 Steam 安装清单、检查已有进程，并验证 DX11/DX12 是否兼容现有修复方法。",
                 PresentationTone::InProgress, false, false};
     case SessionPhase::Listening:
         return {L"监听已启动",
@@ -359,7 +372,7 @@ SessionPresentation PresentSessionStatus(const SessionStatus& status) {
                 PresentationTone::InProgress, false, false};
     case SessionPhase::InstallingGuard:
         return {L"正在安装最小 Hook Guard",
-                L"仅精确 Verified Profile 可进入此阶段；写入前再次比较 IAT 所有权。",
+                L"构建和运行时校验已通过；写入前再次核对关键代码与 IAT 所有权。",
                 PresentationTone::InProgress, false, false};
     case SessionPhase::Monitoring:
         return {L"保护已安装，正在确认 2K 状态",
@@ -394,6 +407,10 @@ SessionPresentation PresentPlayerStatus(const SessionStatus& s) {
         p.headline=L"2K 已就绪";p.detail=L"可以关闭工具，继续游戏。";break;
     case SessionResult::MonitorTimedOutHookKept:
         p.headline=L"未能确认 2K 状态";p.detail=L"请查看游戏内的在线状态。如需反馈，请点“反馈问题”。";break;
+    case SessionResult::UnsupportedAfterProbeRestored:
+        p.detail=L"已尝试现有方法，未确认有效；本次保护入口已撤销。请点“反馈问题”。";break;
+    case SessionResult::UnsupportedAfterProbeCleanupUncertain:
+        p.detail=L"已尝试现有方法，未确认有效。请正常退出游戏，并点“反馈问题”。";break;
     case SessionResult::CancelledOwnershipUnreadable: case SessionResult::CancelledRestoreUnconfirmed:
     case SessionResult::CancelledHookNotOwnedNoWrite:
     case SessionResult::CancelledOwnedHookRestoredProtectionUncertainAllocationRetained:

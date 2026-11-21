@@ -180,7 +180,7 @@ if (-not $SkipTests) {
     $updateResults | Write-Output
     $updateTestCount=@($updateResults | Where-Object {$_ -like 'PASS:*'}).Count
 }
-foreach ($name in @('FixSession', 'SessionPresentation', 'FeedbackFile', 'UpdateFlow', 'SteamDiscovery', 'Logger', 'Win32FixPlatform', 'AppWindow')) {
+foreach ($name in @('CompatibilityProbe', 'FixSession', 'SessionPresentation', 'FeedbackFile', 'UpdateFlow', 'SteamDiscovery', 'Logger', 'Win32FixPlatform', 'AppWindow')) {
     $object = Join-Path $buildRoot "$name.obj"
     $compileArgs = @($commonCompilerArgs) + @(
         '/c'
@@ -201,6 +201,7 @@ $testArgs = @($commonCompilerArgs) + @(
     "/Fe$testExe"
     (Join-Path $testRoot 'Civ6FixCoreTests.cpp')
     $objects['FixSession']
+    $objects['CompatibilityProbe']
     $objects['SessionPresentation']
     $objects['SteamDiscovery']
     $objects['FeedbackFile']
@@ -273,6 +274,7 @@ $appArgs = @($commonCompilerArgs) + @(
     "/Fe$appExe"
     (Join-Path $sourceRoot 'Civ6_2K_Online_Fix.cpp')
     $objects['FixSession']
+    $objects['CompatibilityProbe']
     $objects['SessionPresentation']
     $objects['SteamDiscovery']
     $objects['Logger']

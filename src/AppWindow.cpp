@@ -108,6 +108,10 @@ const char* ResultName(SessionResult result) {
         return "guard_install_failed_state_uncertain_allocation_retained";
     case SessionResult::TargetWaitFailedHookKept:
         return "target_wait_failed_hook_kept";
+    case SessionResult::UnsupportedAfterProbeRestored:
+        return "unsupported_after_probe_restored";
+    case SessionResult::UnsupportedAfterProbeCleanupUncertain:
+        return "unsupported_after_probe_cleanup_uncertain";
     }
     return "unknown";
 }

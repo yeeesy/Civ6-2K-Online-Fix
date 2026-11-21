@@ -187,6 +187,7 @@ struct SessionDiagnostics {
     std::uint32_t scanError = 0;
     bool guardInstalled = false;
     std::optional<IatOwnership> finalOwnership;
+    std::optional<HookCleanupOutcome> compatibilityCleanup;
     std::optional<std::uint64_t> processAgeAtGuardMs;
     VectorProbeState mutexProbe = VectorProbeState::NotAttempted;
     std::optional<std::int32_t> mutexCountBeforeGuard;
