@@ -31,21 +31,62 @@ bool WriteHelper(const fs::path& p) {
     CloseHandle(f);
     return ok;
 }
+bool RunPackageHelper(const std::wstring& operation,bool recovery=false) {
+    wchar_t base[MAX_PATH]{};
+    if(FAILED(SHGetFolderPathW(nullptr,CSIDL_LOCAL_APPDATA,nullptr,SHGFP_TYPE_CURRENT,base)))return false;
+    auto root=fs::path(base)/L"Civ6_2K_Online_Fix";
+    if(!MakePrivateDirectory(root) || !MakePrivateDirectory(root/L"Updates"))return false;
+    UCHAR random[16]{};
+    if(BCryptGenRandom(nullptr,random,sizeof(random),BCRYPT_USE_SYSTEM_PREFERRED_RNG)<0)return false;
+    std::wstring name=L"job-";
+    for(auto b:random){name+=L"0123456789abcdef"[b>>4];name+=L"0123456789abcdef"[b&15];}
+    const auto job=root/L"Updates"/name;
+    if(!CreateDirectoryW(job.c_str(),nullptr))return false;
+    const auto helper=job/L"UpdateAgent.exe";
+    if(!WriteHelper(helper))return false;
+    std::wstring command=L"\""+helper.wstring()+L"\" "+operation;
+    STARTUPINFOW si{};si.cb=sizeof(si);PROCESS_INFORMATION pi{};
+    if(!CreateProcessW(helper.c_str(),command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,job.c_str(),&si,&pi))return false;
+    CloseHandle(pi.hThread);
+    DWORD wait=WAIT_TIMEOUT;DWORD code=1;const auto started=GetTickCount64();
+    while(wait==WAIT_TIMEOUT && GetTickCount64()-started<30000){
+        wait=WaitForSingleObject(pi.hProcess,100);
+        if(recovery && GetFileAttributesW((job/L"armed").c_str())!=INVALID_FILE_ATTRIBUTES){
+            // Recovery must restore the executable after this launcher exits.
+            CloseHandle(pi.hProcess);return false;
+        }
+    }
+    if(wait==WAIT_OBJECT_0)GetExitCodeProcess(pi.hProcess,&code);
+    CloseHandle(pi.hProcess);
+    return wait==WAIT_OBJECT_0 && code==0;
+}
 }
 bool CompleteUpdateHandoff() {
     // Only the authenticated update helper gives its newly launched child this token.
     // A failed handoff exits BEFORE a repair session starts.
     wchar_t token[33]{};
     DWORD n=GetEnvironmentVariableW(L"CIV6FIX_UPDATE_HANDOFF",token,33);
-    if(!n)return GetLastError()==ERROR_ENVVAR_NOT_FOUND;
+    const auto variableError=GetLastError();
+    std::vector<wchar_t> module(32768);
+    const auto length=GetModuleFileNameW(nullptr,module.data(),static_cast<DWORD>(module.size()));
+    if(!length || length>=module.size())return false;
+    const std::wstring target(module.data(),length);
+    FILETIME created{},exited{},kernel{},user{};
+    if(!GetProcessTimes(GetCurrentProcess(),&created,&exited,&kernel,&user))return false;
+    const auto creation=(static_cast<unsigned long long>(created.dwHighDateTime)<<32)|created.dwLowDateTime;
+    const auto identity=std::to_wstring(GetCurrentProcessId())+L" "+std::to_wstring(creation);
+    if(!n){
+        if(variableError!=ERROR_ENVVAR_NOT_FOUND)return false;
+        std::error_code error;
+        for(const auto& entry:fs::directory_iterator(fs::path(target).parent_path(),error)){
+            if(entry.path().filename().wstring().find(L".civ6-update-")==0)
+                return RunPackageHelper(L"recover \""+target+L"\" "+identity,true);
+        }
+        return !error;
+    }
     if(n!=32 || std::wstring_view(token).find_first_not_of(L"0123456789abcdef")!=std::wstring_view::npos)return false;
     SetEnvironmentVariableW(L"CIV6FIX_UPDATE_HANDOFF",nullptr);
-    auto ready=OpenEventW(EVENT_MODIFY_STATE,FALSE,(L"Local\\Civ6Fix-ready-"+std::wstring(token)).c_str());
-    auto commit=OpenEventW(SYNCHRONIZE,FALSE,(L"Local\\Civ6Fix-commit-"+std::wstring(token)).c_str());
-    bool ok=ready && commit && SetEvent(ready) && WaitForSingleObject(commit,20000)==WAIT_OBJECT_0;
-    if(ready)CloseHandle(ready);
-    if(commit)CloseHandle(commit);
-    return ok;
+    return RunPackageHelper(L"handoff \""+target+L"\" "+token+L" "+identity);
 }
 UpdateFlow::~UpdateFlow(){Clear();}
 void UpdateFlow::Clear() {

@@ -9,6 +9,7 @@ docs/MAINTAINER.md
 docs/RELEASE_NOTES_1.1.0.md
 docs/RELEASE_NOTES_1.2.md
 docs/RELEASE_NOTES_1.2.1.md
+docs/RELEASE_NOTES_1.2.2.md
 docs/REVIEW_2026-09-27.md
 src/AppWindow.cpp
 src/AppWindow.h
@@ -32,6 +33,8 @@ src/SessionStatusMailbox.h
 src/SteamDiscovery.cpp
 src/SteamDiscovery.h
 src/UpdateAgent.cs
+src/PackageUpdate.cs
+tests/PackageUpdateTests.cs
 src/UpdateFlow.cpp
 src/UpdateFlow.h
 src/Win32FixPlatform.cpp

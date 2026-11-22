@@ -53,6 +53,12 @@ try {
     }
     Write-Output 'PASS: checksum verifier rejects unlisted package files'
 
+    $usedResult = @(& $verifier -AllowAdditionalFiles)
+    if ($usedResult -notcontains 'SHA-256 verification passed for 2 files.') {
+        throw 'Used portable directory verification did not validate all managed files.'
+    }
+    Write-Output 'PASS: explicit used-directory verification preserves additional user files'
+
     Remove-Item -LiteralPath $unlisted -Force
     $checksumFile = Join-Path $fixtureFull 'SHA256SUMS.txt'
     $validChecksumLines = @(Get-Content -LiteralPath $checksumFile)

@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$ChecksumFile = (Join-Path $PSScriptRoot 'SHA256SUMS.txt')
+    [string]$ChecksumFile = (Join-Path $PSScriptRoot 'SHA256SUMS.txt'),
+    [switch]$AllowAdditionalFiles
 )
 
 Set-StrictMode -Version Latest
@@ -70,12 +71,12 @@ $actualFiles = @($packageEntries | Where-Object {
         $checksumFull, [StringComparison]::OrdinalIgnoreCase)
 })
 foreach ($file in $actualFiles) {
-    if (-not $listedFiles.Contains([IO.Path]::GetFullPath($file.FullName))) {
+    if (-not $AllowAdditionalFiles -and -not $listedFiles.Contains([IO.Path]::GetFullPath($file.FullName))) {
         $relative = [IO.Path]::GetRelativePath($PSScriptRoot, $file.FullName)
         throw "Package contains an unlisted file: $relative"
     }
 }
-if ($actualFiles.Count -ne $listedFiles.Count) {
+if (-not $AllowAdditionalFiles -and $actualFiles.Count -ne $listedFiles.Count) {
     throw "Checksum file set does not match the package: listed $($listedFiles.Count), found $($actualFiles.Count)."
 }
 

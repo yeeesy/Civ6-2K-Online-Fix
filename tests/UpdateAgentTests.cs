@@ -4,11 +4,13 @@ using System.IO;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
+using System.Linq;
 
 internal static class UpdateAgentTests {
-    static void Check(bool ok,string text){if(!ok)throw new Exception(text); Console.WriteLine("PASS: "+text);}
+    static void Check(bool ok,string text){Console.WriteLine((ok?"PASS: ":"FAIL: ")+text);if(!ok)throw new Exception(text);}
     static bool Reject(Action f){try{f();return false;}catch{return true;}}
     static void Put(ZipArchive z,string name,string s){using(var w=new StreamWriter(z.CreateEntry(name).Open(),new UTF8Encoding(false)))w.Write(s);}
+    static string HashText(string text){using(var h=SHA256.Create())return BitConverter.ToString(h.ComputeHash(Encoding.UTF8.GetBytes(text))).Replace("-","");}
     public static int Main(){
         var t=Path.Combine(Path.GetTempPath(),"Civ6Fix-Update-Test-"+Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(t);
@@ -20,7 +22,9 @@ internal static class UpdateAgentTests {
             var zip=Path.Combine(t,"test.zip");var sample=Path.Combine(t,"expected");
             File.WriteAllText(sample,content,new UTF8Encoding(false));
             using(var f=File.Create(zip))using(var z=new ZipArchive(f,ZipArchiveMode.Create)){
-                Put(z,"../escape.txt","ignored");Put(z,entry,content);
+                Put(z,entry,content);Put(z,"Civ6_2K_Online_Fix_"+v+"/README.md","new documentation");
+                Put(z,"Civ6_2K_Online_Fix_"+v+"/SHA256SUMS.txt",HashText(content)+"  "+UpdateAgent.Exe+"\n"+
+                    HashText("new documentation")+"  README.md\n");
             }
             var body=Encoding.UTF8.GetBytes(String.Join("\n",new[]{"CIV6-UPDATE/1",UpdateAgent.Repo,v,
                 new FileInfo(zip).Length.ToString(),UpdateAgent.HashFile(zip),new FileInfo(sample).Length.ToString(),UpdateAgent.HashFile(sample)}));
@@ -37,6 +41,7 @@ internal static class UpdateAgentTests {
                 var outFile=Path.Combine(outDir,"payload");
                 UpdateAgent.Extract(zip,outFile,m);
                 Check(File.ReadAllText(outFile)==content && !File.Exists(Path.Combine(t,"escape.txt")),"only selected verified bytes are extracted");
+                Check(File.Exists(Path.Combine(outDir,"files","README.md")),"the signed update stages documentation and its complete file manifest");
                 var duplicate=Path.Combine(t,"duplicate.zip");
                 using(var f=File.Create(duplicate))using(var z=new ZipArchive(f,ZipArchiveMode.Create)){Put(z,entry,content);Put(z,entry,content);}
                 Check(Reject(()=>UpdateAgent.Extract(duplicate,Path.Combine(t,"bad-archive"),m)),"a changed archive fails its signed hash or length");
@@ -50,8 +55,10 @@ internal static class UpdateAgentTests {
             File.WriteAllText(incoming,"new");
             UpdateAgent.Swap(target,incoming,bak,old,next,delegate{});
             Check(UpdateAgent.HashFile(target)==next && UpdateAgent.HashFile(bak)==old,"successful update swaps only the target and retains matching backup");
+            PackageUpdateTests.Run(t);
             return 0;
         } finally {foreach(var file in Directory.GetFiles(t,"*",SearchOption.AllDirectories)) File.Delete(file);
-            var child=Path.Combine(t,"stage");if(Directory.Exists(child))Directory.Delete(child);Directory.Delete(t);}
+            foreach(var child in Directory.GetDirectories(t,"*",SearchOption.AllDirectories).OrderByDescending(x=>x.Length))Directory.Delete(child);
+            Directory.Delete(t);}
     }
 }

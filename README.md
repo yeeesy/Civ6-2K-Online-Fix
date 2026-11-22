@@ -8,7 +8,7 @@
 
 ## 当前版本
 
-**1.2.1** 增加游戏更新后的自动兼容检查：EXE 哈希变化时，会先验证现有修复方法所需的代码和运行库，兼容时自动尝试修复。Windows Steam 版《文明 VI》`1.0.12.74` 的 DX11、DX12 已完成实测，保留对旧构建的支持。从 [Releases](https://github.com/yeeesy/Civ6-2K-Online-Fix/releases) 下载 ZIP，或在 1.2 中直接检查更新。感谢 [TUcookie 的前期适配贡献](https://github.com/yeeesy/Civ6-2K-Online-Fix/pull/2)。
+**1.2.2** 补齐完整发行目录更新与失败回退，保留用户配置、日志和反馈；已有 1.2.1、1.2.0 可直接在工具中检查更新。沿用 1.2.1 的游戏自动兼容检查，Windows Steam 版《文明 VI》`1.0.12.74` 的 DX11、DX12 已完成实测，并保留旧构建支持。从 [Releases](https://github.com/yeeesy/Civ6-2K-Online-Fix/releases) 下载 ZIP。感谢 [TUcookie 的前期适配贡献](https://github.com/yeeesy/Civ6-2K-Online-Fix/pull/2)。
 
 | 渲染器 | 状态 | 工具行为 |
 | --- | --- | --- |
@@ -55,6 +55,8 @@ Civ6_2K_Online_Fix.exe --self-test          纯离线自检
 
 从 **1.2.0** 起，打开工具窗口会自动检查工具新版本（通常每天一次），也可以点 **检查更新** 立即检查。适配新版游戏的正式工具发布后，在提示中选择“是”即可下载并验证签名更新，无需手动替换 EXE。正在监控时，更新会等到本轮会话结束后安装，配置和反馈文件保留。Steam 更新游戏本身不会给工具添加兼容配置。尚无此更新功能的旧版用户仍需先下载一次 ZIP。
 
+从 **1.2.2** 起，工具内更新会同步主程序、文档、源码、构建信息和校验清单；升级 1.2.0、1.2.1 时由新版首次启动接续完成。安装、自检或启动确认失败会回退整套发行文件。用户配置、日志、反馈与额外文件保留；用户修改过的发行文件或路径冲突会阻止更新，避免覆盖个人内容。已使用目录可运行 `verify_hashes.ps1 -AllowAdditionalFiles` 核验清单内所有文件；新解压包默认仍检查完整文件集合。
+
 `1.1.0` 的增强诊断提供读取质量、相对时间线和超时分类，详见 [脱敏诊断与超时反馈](docs/DIAGNOSTICS.md)。旧版 `1.0.0` 仍采用简要报告格式，请以报告中的诊断格式为准。超时只表示未在期限内确认同时就绪，不等于数据库损坏；不要因此直接删除 SQLite 文件。
 
 ## 安全与隐私
@@ -86,4 +88,4 @@ Civ6_2K_Online_Fix.exe --self-test          纯离线自检
 
 ## English summary
 
-Civ6 2K Online Fix is an unofficial Windows helper for a specific local initialization failure in the Steam version of Civilization VI. Version 1.2.1 verifies structural compatibility before trying the existing repair on updated EXEs, with DX11 and DX12 of 1.0.12.74 tested. Earlier supported builds, shareable text reports and signed tool updates remain available. See the [project and releases](https://github.com/yeeesy/Civ6-2K-Online-Fix).
+Civ6 2K Online Fix is an unofficial Windows helper for a specific local initialization failure in the Steam version of Civilization VI. Version 1.2.2 updates the complete distribution with rollback and preserves user data. It retains structural game compatibility checks and tested DX11/DX12 support for 1.0.12.74 and earlier supported builds. See the [project and releases](https://github.com/yeeesy/Civ6-2K-Online-Fix).
