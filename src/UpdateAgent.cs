@@ -12,6 +12,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
+using System.Linq;
 
 internal static class UpdateAgent {
     internal const string Repo = "yeeesy/Civ6-2K-Online-Fix";
@@ -123,18 +124,8 @@ internal static class UpdateAgent {
         return 20;
     }
     internal static void Extract(string zip,string payload,Manifest m) {
-        using(var fs=File.OpenRead(zip)){
-            Require(fs.Length==m.ZipSize && Same(Digest(fs),m.ZipHash));fs.Position=0;
-            using(var z=new ZipArchive(fs,ZipArchiveMode.Read)){
-                Require(z.Entries.Count<=4096);
-                var name="Civ6_2K_Online_Fix_"+m.Version+"/"+Exe;ZipArchiveEntry match=null;
-                foreach(var e in z.Entries) if(Same(e.FullName.Replace('\\','/'),name)){Require(match==null);match=e;}
-                Require(match!=null && match.Length==m.ExeSize);
-                using(var src=match.Open())using(var to=new FileStream(payload,FileMode.CreateNew,FileAccess.Write,FileShare.None)){
-                    BoundedCopy(src,to,m.ExeSize);to.Flush(true);
-                }
-            }
-        }
+        var package=PackageUpdate.StageZip(zip,Path.Combine(Path.GetDirectoryName(payload),"files"),m);
+        File.Copy(PackageUpdate.At(package.Directory,Exe),payload,false);
         Require(new FileInfo(payload).Length==m.ExeSize && Same(HashFile(payload),m.ExeHash));
     }
     static void Prepare(string target,string version){
@@ -162,7 +153,7 @@ internal static class UpdateAgent {
             Require(child.ExitCode==0);
         }
     }
-    static void RestartVerified(string exe) {
+    static void RestartVerified(string exe,Action commitFiles) {
         var token=Guid.NewGuid().ToString("N");
         bool r,c;
         using(var ready=new EventWaitHandle(false,EventResetMode.ManualReset,@"Local\Civ6Fix-ready-"+token,out r))
@@ -172,6 +163,7 @@ internal static class UpdateAgent {
             si.EnvironmentVariables["CIV6FIX_UPDATE_HANDOFF"]=token;
             using(var child=Process.Start(si)){
                 Require(child!=null);
+                try{
                 var watch=Stopwatch.StartNew();
                 while(!ready.WaitOne(100)){
                     if(child.HasExited)throw new InvalidDataException("updated launcher exited before UI startup");
@@ -181,7 +173,11 @@ internal static class UpdateAgent {
                         throw new TimeoutException("updated launcher did not acknowledge startup");
                     }
                 }
-                Require(commit.Set());
+                commitFiles();Require(commit.Set());
+                }catch{
+                    if(!child.HasExited){child.Kill();Require(child.WaitForExit(5000));}
+                    throw;
+                }
             }
         }
     }
@@ -203,35 +199,77 @@ internal static class UpdateAgent {
         var m=Verify(File.ReadAllText(Staged("envelope.txt"),Utf8),version,Key());
         Require(Newer(version,ProductVersion(target)) && new FileInfo(Staged("payload.exe")).Length==m.ExeSize &&
                 Same(HashFile(Staged("payload.exe")),m.ExeHash));
-        string old=HashFile(target),id=Guid.NewGuid().ToString("N");
-        string next=target+"."+id+".new", backup=target+"."+id+".bak";
-        bool parentExited=false,ownedIncoming=false;
+        string old=HashFile(target);bool parentExited=false;
+        var package=PackageUpdate.StageZip(Staged("bundle.zip"),Staged("apply-files-"+Guid.NewGuid().ToString("N")),m);
         try {
             using(var parent=Process.GetProcessById(pid)){
                 Require(parent.StartTime.ToUniversalTime().ToFileTimeUtc()==creation &&
                         Same(Path.GetFullPath(parent.MainModule.FileName),target));
-                using(var src=File.OpenRead(Staged("payload.exe")))
-                using(var dst=new FileStream(next,FileMode.CreateNew,FileAccess.Write,FileShare.None)){
-                    ownedIncoming=true;BoundedCopy(src,dst,m.ExeSize);dst.Flush(true);
-                }
-                Require(Same(HashFile(next),m.ExeHash));
                 File.WriteAllText(Staged("armed"),"ready",Utf8);
                 Require(parent.WaitForExit(60000));parentExited=true;
             }
-            Swap(target,next,backup,old,m.ExeHash,delegate {
-                TestExe(target);
-                RestartVerified(target);
-            });
-            // Leave a recoverable backup if removal is denied. Never touch user config or logs.
-            try { File.Delete(backup); } catch(IOException) {} catch(UnauthorizedAccessException) {}
+            Require(Same(HashFile(target),old));
+            PackageUpdate.RecoverAll(Path.GetDirectoryName(target));
+            using(var transaction=new PackageUpdate.Transaction(Path.GetDirectoryName(target),package,false)){
+                try{
+                    transaction.Install(null);Require(PackageUpdate.Installed(Path.GetDirectoryName(target),package));
+                    TestExe(target);RestartVerified(target,transaction.Commit);
+                }catch{transaction.RevertCommitted();throw;}
+            }
         } catch {
             if(parentExited && File.Exists(target) && Same(HashFile(target),old)){
                 using(var child=Run(target,"--watch-only",false)){}
             }
             throw;
-        } finally {
-            if(ownedIncoming && File.Exists(next))File.Delete(next);
         }
+    }
+    static PackageUpdate.Package FindAuthenticatedPackage(string target,string version) {
+        var root=Directory.GetParent(Stage.TrimEnd(Path.DirectorySeparatorChar)).FullName;
+        foreach(var job in Directory.GetDirectories(root).OrderByDescending(Directory.GetLastWriteTimeUtc).Take(128)){
+            if(!Regex.IsMatch(Path.GetFileName(job),@"\Ajob-[0-9a-f]{32}\z"))continue;
+            try{
+                PackageUpdate.Plain(job);
+                var envelope=Path.Combine(job,"envelope.txt");var zip=Path.Combine(job,"bundle.zip");
+                if(!File.Exists(envelope) || !File.Exists(zip) || !File.Exists(Path.Combine(job,"armed")))continue;
+                Require(new FileInfo(envelope).Length<=32768);
+                var manifest=Verify(File.ReadAllText(envelope,Utf8),version,Key());
+                if(manifest.ExeSize!=new FileInfo(target).Length || !Same(manifest.ExeHash,HashFile(target)))continue;
+                return PackageUpdate.StageZip(zip,Staged("handoff-files"),manifest);
+            }catch(InvalidDataException){}catch(IOException){}catch(UnauthorizedAccessException){}catch(CryptographicException){}
+        }
+        throw new InvalidDataException("no authenticated handoff package");
+    }
+    static void Handoff(string target,string token,int pid,long creation) {
+        Require(Regex.IsMatch(token,@"\A[0-9a-f]{32}\z"));
+        using(var ready=EventWaitHandle.OpenExisting(@"Local\Civ6Fix-ready-"+token))
+        using(var commit=EventWaitHandle.OpenExisting(@"Local\Civ6Fix-commit-"+token))
+        using(var parent=Process.GetProcessById(pid)){
+            Require(parent.StartTime.ToUniversalTime().ToFileTimeUtc()==creation && Same(parent.MainModule.FileName,target));
+            var package=FindAuthenticatedPackage(target,ProductVersion(target));var root=Path.GetDirectoryName(target);
+            PackageUpdate.Transaction transaction=null;
+            try{
+                if(!PackageUpdate.Installed(root,package)){
+                    PackageUpdate.RecoverAll(root);
+                    transaction=new PackageUpdate.Transaction(root,package,true);
+                    transaction.Install(delegate{Require(!parent.HasExited);});
+                    Require(PackageUpdate.Installed(root,package));
+                    transaction.Commit();
+                }
+                Require(!parent.HasExited && ready.Set());
+                var watch=Stopwatch.StartNew();
+                while(!commit.WaitOne(50))Require(!parent.HasExited && watch.Elapsed.TotalSeconds<20);
+            }catch{if(transaction!=null)transaction.RevertCommitted();throw;}
+            finally{if(transaction!=null)transaction.Dispose();}
+        }
+    }
+    static void Recover(string target,int pid,long creation) {
+        using(var parent=Process.GetProcessById(pid)){
+            Require(parent.StartTime.ToUniversalTime().ToFileTimeUtc()==creation && Same(parent.MainModule.FileName,target));
+            File.WriteAllText(Staged("armed"),"recovery",Utf8);
+            Require(parent.WaitForExit(60000));
+        }
+        PackageUpdate.RecoverAll(Path.GetDirectoryName(target));TestExe(target);
+        using(var child=Run(target,"--watch-only",false)){}
     }
     public static int Main(string[] args){
         try {
@@ -242,6 +280,8 @@ internal static class UpdateAgent {
             if(args[0]=="check" && args.Length==3)return Check(t,args[2]=="manual");
             if(args[0]=="prepare" && args.Length==3){Prepare(t,args[2]);return 0;}
             if(args[0]=="apply" && args.Length==5){Apply(t,args[2],int.Parse(args[3],CultureInfo.InvariantCulture),long.Parse(args[4],CultureInfo.InvariantCulture));return 0;}
+            if(args[0]=="handoff" && args.Length==5){Handoff(t,args[2],int.Parse(args[3],CultureInfo.InvariantCulture),long.Parse(args[4],CultureInfo.InvariantCulture));return 0;}
+            if(args[0]=="recover" && args.Length==4){Recover(t,int.Parse(args[2],CultureInfo.InvariantCulture),long.Parse(args[3],CultureInfo.InvariantCulture));return 0;}
         } catch(Exception) { return 1; }
         return 2;
     }

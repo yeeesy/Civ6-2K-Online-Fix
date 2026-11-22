@@ -159,6 +159,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $framework 'mscorlib.dll'))) {
     $framework = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319'
 }
 $updateSource = Join-Path $sourceRoot 'UpdateAgent.cs'
+$packageUpdateSource = Join-Path $sourceRoot 'PackageUpdate.cs'
 $updateKey = Join-Path $sourceRoot 'update-public-key.xml'
 $keyText=(Get-Content -LiteralPath $updateKey -Raw).Trim()
 $publicOnly=[regex]::Match($keyText,'^<RSAKeyValue><Modulus>([A-Za-z0-9+/]+={0,2})</Modulus><Exponent>AQAB</Exponent></RSAKeyValue>$')
@@ -168,12 +169,12 @@ if(!$publicOnly.Success -or [Convert]::FromBase64String($publicOnly.Groups[1].Va
 $managedArgs = @('/nologo','/noconfig','/nostdlib+','/optimize+','/deterministic+','/debug-','/warnaserror+','/platform:x64',"/pathmap:$projectRoot=.",
     "/resource:$updateKey,PublisherKey") + @('mscorlib','System','System.Core','System.Xml','System.Web.Extensions','System.IO.Compression') |
     ForEach-Object { if ($_ -like 'System*' -or $_ -eq 'mscorlib'){"/reference:$(Join-Path $framework ($_+'.dll'))"}else{$_} }
-& $csc @managedArgs '/target:winexe' "/out:$(Join-Path $generatedRoot 'UpdateAgent.generated.exe')" $updateSource
+& $csc @managedArgs '/target:winexe' "/out:$(Join-Path $generatedRoot 'UpdateAgent.generated.exe')" $updateSource $packageUpdateSource
 if ($LASTEXITCODE -ne 0) { throw 'Update helper compilation failed.' }
 $updateTestCount=0
 if (-not $SkipTests) {
     $updateTestExe=Join-Path $buildRoot 'UpdateAgentTests.exe'
-    & $csc @managedArgs '/target:exe' '/main:UpdateAgentTests' "/out:$updateTestExe" $updateSource (Join-Path $testRoot 'UpdateAgentTests.cs')
+    & $csc @managedArgs '/target:exe' '/main:UpdateAgentTests' "/out:$updateTestExe" $updateSource $packageUpdateSource (Join-Path $testRoot 'UpdateAgentTests.cs') (Join-Path $testRoot 'PackageUpdateTests.cs')
     if ($LASTEXITCODE -ne 0) {throw 'Update test compilation failed.'}
     $updateResults=@(& $updateTestExe)
     if ($LASTEXITCODE -ne 0) {throw 'Offline update tests failed.'}
